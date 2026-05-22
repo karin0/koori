@@ -1,0 +1,74 @@
+[project]
+name = "koori"
+version = "0.1.0"
+authors = [{ name = "karin0", email = "karin0@gmx.com" }]
+requires-python = ">=3.14"
+dependencies = [
+    "aiohttp>=3.13.5",
+    "asyncssh>=2.18",
+    "prometheus-client>=0.21",
+    "ptbcontrib",
+    "python-telegram-bot>=22",
+]
+
+[dependency-groups]
+dev = ["ruff>=0.15.12", "pyright>=1.1.409"]
+
+[tool.uv.sources]
+ptbcontrib = { git = "https://github.com/python-telegram-bot/ptbcontrib", rev = "main" }
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "A",
+    "ANN",
+    "ARG",
+    "D",
+    "EM",
+    "ERA",
+    "FAST",
+    "FBT",
+    "PTH",
+    "COM812",
+
+    "BLE001",
+    "DTZ005",
+    "DTZ006",
+    "N818",
+    "PLW0603",
+    "PLW2901",
+    "RET503",
+    "RUF021",
+    "RUF022",
+    "RUF023",
+    "SLF001",
+    "TC001",
+    "TC006",
+    "TRY003",
+    "TRY004",
+    "TRY300",
+    "TRY301",
+    "TRY400",
+
+    "PLR",
+    "ASYNC240",
+    "C901",
+]
+
+[tool.ruff.format]
+quote-style = "preserve"
+
+[tool.ruff.lint.flake8-quotes]
+docstring-quotes = "single"
+inline-quotes = "single"
+multiline-quotes = "single"
+
+[tool.ruff.lint.isort]
+lines-between-types = 1
+
+[tool.pyright]
+typeCheckingMode = "standard"
+pythonVersion = "3.14"

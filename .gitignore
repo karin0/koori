@@ -1,0 +1,10 @@
+.vscode
+.idea
+.claude
+.venv
+__pycache__
+*.pyc
+*.pyo
+state.json
+config.toml
+*.env
