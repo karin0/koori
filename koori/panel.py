@@ -6,6 +6,8 @@ import time
 
 from typing import TYPE_CHECKING
 
+from telegram.constants import MessageLimit
+
 if TYPE_CHECKING:
     from collections import deque
     from collections.abc import Sequence
@@ -15,7 +17,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-TG_MESSAGE_LIMIT = 4096
+TG_MESSAGE_LIMIT = MessageLimit.MAX_TEXT_LENGTH
 LINE_TRIM = 180
 BAR_WIDTH = 12
 PARTIALS = '▏▎▍▌▋▊▉'
@@ -30,8 +32,7 @@ def _eff_len(s: str) -> int:
     return len(html.unescape(_TAG_RE.sub('', s)))
 
 
-def _fmt_size(n: float) -> str:
-    x = float(n)
+def _fmt_size(x: float) -> str:
     for unit in ('B', 'K', 'M', 'G', 'T'):
         if x < 1024:
             return f'{x:.1f}{unit}'
@@ -39,10 +40,9 @@ def _fmt_size(n: float) -> str:
     return f'{x:.1f}P'
 
 
-def _fmt_bps(b: float | None) -> str:
-    if b is None:
+def _fmt_bps(x: float | None) -> str:
+    if x is None:
         return '   —  '
-    x = b
     for unit in ('B/s', 'K/s', 'M/s', 'G/s'):
         if x < 1024:
             return f'{x:6.1f}{unit}'
@@ -103,8 +103,8 @@ def _gauge(label: str, pct: float | None, used: int = 0, total: int = 0) -> str:
 
 
 def _cpu_row(avg: float | None, peak: float | None, count: int) -> str:
-    cores = f'  ({count}c)' if count > 0 else ''
-    peak_s = f' / {_pct_str(peak).strip()}' if peak is not None else ''
+    cores = f' / {f'{count}x':>6}' if count > 0 else ''
+    peak_s = f' {_pct_str(peak).strip():>6}' if peak is not None else ''
     return f'CPU  {_bar_dual(avg, peak)} {_pct_str(avg)}{peak_s}{cores}'
 
 
@@ -120,21 +120,27 @@ def _trim(line: str, n: int = LINE_TRIM) -> str:
     return line if len(line) <= n else line[: n - 1] + '…'
 
 
-async def _render_server(server: ServerState) -> list[str]:
-    header = f'{_status_dot(server)} <b>{html.escape(server.name)}</b>'
+async def _render_server(server: ServerState) -> Sequence[str]:
+    name = f'<b>{html.escape(server.name)}</b>'
     if (func := server.update) is None:
-        return [header, f'<i>offline: {html.escape(server.error or "starting…")}</i>']
+        header = '🔴 ' + name
+        return (header, f'offline: {html.escape(server.error or "starting…")}')
 
+    t0 = time.monotonic()
     try:
-        t0 = time.monotonic()
         m = await asyncio.wait_for(func(), timeout=METRICS_FETCH_TIMEOUT)
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        return [header, f'<i>error: {html.escape(str(e))}</i>']
+        header = '🟡 ' + name
+        err = f'error: {html.escape(str(e))}'
+        if (m := server.metrics) is None:
+            return (header, err)
+        header += f'\n{err}'
 
     dt = time.monotonic() - t0
-    header += f'  ({_fmt_duration(dt)})'
+    unix = round(m.timestamp)
+    header = f'🟢 {name}  ({_fmt_duration(dt)}, <tg-time unix="{unix}" format="r">{unix}</tg-time>)'
 
     pct_mem = 100 * m.mem_used / m.mem_total if m.mem_total > 0 else None
     pct_swap = 100 * m.swap_used / m.swap_total if m.swap_total > 0 else None
@@ -149,7 +155,7 @@ async def _render_server(server: ServerState) -> list[str]:
     rows.append(_gauge(m.fs_mount, pct_fs, m.fs_used, m.fs_total))
     rows.append(f'NET  ↓{_fmt_bps(m.rx_bps)}   ↑{_fmt_bps(m.tx_bps)}')
 
-    return [header, '<pre>' + html.escape('\n'.join(rows)) + '</pre>']
+    return (header, '<pre>' + html.escape('\n'.join(rows)) + '</pre>')
 
 
 def _fit_journal(

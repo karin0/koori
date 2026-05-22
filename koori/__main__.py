@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .bot import PanelControl, build_bot, render_loop, update_poller
-from .connecter import LocalConnecter, SshConnecter
+from .connecter import LocalConnecter, SSHConnecter
 from .panel import render_panel
 from .server import JOURNAL_BUFFER_SIZE, JournalEntry, ServerState, run_server
 
@@ -28,7 +28,7 @@ def _build_server(spec: dict[str, Any]) -> ServerState:
         case 'local':
             connector = LocalConnecter()
         case 'ssh' | None:
-            connector = SshConnecter(spec.get('host', name))
+            connector = SSHConnecter(spec.get('host', name))
         case other:
             raise ValueError(f'unknown connecter kind: {other!r}')
 

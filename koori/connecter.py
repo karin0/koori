@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import asyncssh
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
 UDS_DIR = os.path.join(tempfile.gettempdir(), 'koori')
 
@@ -93,7 +93,7 @@ class LocalConnecter(Connecter):
     __slots__ = ()
 
     @asynccontextmanager
-    async def open(self) -> AsyncIterator[Connection]:
+    async def open(self) -> AsyncGenerator[Connection]:
         proc = await asyncio.create_subprocess_exec(
             *JOURNAL_CMD, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
         )
@@ -109,29 +109,29 @@ class LocalConnecter(Connecter):
                     await proc.wait()
 
 
-class _SshConnection(Connection):
-    __slots__ = ('_process', '_uds_path')
+class _SSHConnection(Connection):
+    __slots__ = ('_stdout', '_uds_path')
 
-    def __init__(self, process: asyncssh.SSHClientProcess[str], uds_path: str) -> None:
-        self._process = process
+    def __init__(self, stdout: asyncssh.SSHReader[str], uds_path: str) -> None:
+        self._stdout = stdout
         self._uds_path = uds_path
 
     async def journal_lines(self) -> AsyncIterator[str]:
-        async for line in self._process.stdout:
+        async for line in self._stdout:
             yield line.rstrip()
 
     async def _open_metrics(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         return await asyncio.open_unix_connection(self._uds_path)
 
 
-class SshConnecter(Connecter):
+class SSHConnecter(Connecter):
     __slots__ = ('host',)
 
     def __init__(self, host: str) -> None:
         self.host = host
 
     @asynccontextmanager
-    async def open(self) -> AsyncIterator[Connection]:
+    async def open(self) -> AsyncGenerator[Connection]:
         os.makedirs(UDS_DIR, exist_ok=True)
         uds_path = os.path.join(UDS_DIR, f'{self.host}.sock')
         with contextlib.suppress(FileNotFoundError):
@@ -143,7 +143,7 @@ class SshConnecter(Connecter):
             try:
                 listener = await ssh.forward_local_path_to_port(uds_path, '127.0.0.1', METRICS_PORT)
                 process = await ssh.create_process(' '.join(JOURNAL_CMD))
-                yield _SshConnection(process, uds_path)
+                yield _SSHConnection(process.stdout, uds_path)
             finally:
                 log.debug('closing connection: %s', self.host)
                 if process is not None:

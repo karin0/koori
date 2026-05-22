@@ -1,8 +1,10 @@
 import asyncio
 import contextlib
+import html
 import json
 import logging
 import os
+import time
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -32,13 +34,22 @@ MAX_INTERVAL = 60.0
 LONG_POLL_TIMEOUT = 30  # seconds Telegram holds the request open
 HTTP_TIMEOUT = 30
 HTTP_GET_UPDATES_TIMEOUT = LONG_POLL_TIMEOUT + 10  # HTTP timeout must exceed long-poll
+MEM_AVAIL_ALERT = 200 << 20  # 200 MiB
+FS_AVAIL_ALERT = 2 << 30  # 2 GiB
+ALERT_RESEND = 600.0  # re-alert every 10 min
 
 
-@dataclass
+@dataclass(slots=True, eq=False, match_args=False)
 class PanelControl:
     interval: float = DEFAULT_INTERVAL
     expanded: bool = False
     refresh: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+@dataclass(slots=True, eq=False, match_args=False)
+class AlertState:
+    keys: frozenset[str] = frozenset()
+    sent_at: float = 0.0
 
 
 def _keyboard(ctrl: PanelControl) -> InlineKeyboardMarkup:
@@ -80,15 +91,18 @@ def build_bot() -> Bot:
 
 
 async def ensure_panel_message(bot: Bot, chat_id: int, ctrl: PanelControl) -> int:
-    state: dict[str, int] = {}
-    if STATE_FILE.exists():
-        try:
-            state = json.loads(STATE_FILE.read_text())
-        except (OSError, json.JSONDecodeError) as e:
-            log.warning('state load failed: %s', e)
     key = str(chat_id)
-    if key in state:
-        return int(state[key])
+    try:
+        with STATE_FILE.open(encoding='utf-8') as fp:
+            state = json.load(fp)
+    except FileNotFoundError:
+        state = {}
+    except (OSError, json.JSONDecodeError) as e:
+        state = {}
+        log.warning('state load failed: %s', e)
+    else:
+        if (val := state.get(key)) is not None:
+            return val
 
     msg = await bot.send_message(
         chat_id=chat_id,
@@ -104,14 +118,78 @@ async def ensure_panel_message(bot: Bot, chat_id: int, ctrl: PanelControl) -> in
     except TelegramError as e:
         log.warning('pin failed (continuing anyway): %s', e)
 
-    state[key] = msg.message_id
-    STATE_FILE.write_text(json.dumps(state))
-    return msg.message_id
+    state[key] = val = msg.message_id
+    with STATE_FILE.open('w', encoding='utf-8') as fp:
+        json.dump(state, fp, ensure_ascii=False)
+    return val
 
 
 async def wait_servers(sema: asyncio.Semaphore, iter: Iterable) -> None:
     for _ in iter:
         await sema.acquire()
+
+
+async def _check_alerts(
+    bot: Bot,
+    chat_id: int,
+    servers: Sequence[ServerState],
+    state: AlertState,
+) -> None:
+    lines: list[str] = []
+    keys: set[str] = set()
+
+    for s in servers:
+        m = s.metrics
+        if m is None:
+            continue
+
+        mem_key = f'{s.name}:mem'
+        mem_avail = m.mem_total - m.mem_used
+        if m.mem_total > 0 and mem_avail <= MEM_AVAIL_ALERT:
+            keys.add(mem_key)
+            lines.append(
+                f'\u26a0\ufe0f <b>{html.escape(s.name)}</b>: '
+                f'available memory low ({mem_avail / 1024 / 1024:.0f} MB)'
+            )
+        elif mem_key in state.keys:
+            lines.append(
+                f'✅ <b>{html.escape(s.name)}</b>: '
+                f'memory recovered ({mem_avail / 1024 / 1024:.0f} MB available)'
+            )
+
+        fs_key = f'{s.name}:fs'
+        fs_avail = m.fs_total - m.fs_used
+        if m.fs_total > 0 and fs_avail <= FS_AVAIL_ALERT:
+            keys.add(fs_key)
+            lines.append(
+                f'\u26a0\ufe0f <b>{html.escape(s.name)}</b>: '
+                f'available disk space low ({fs_avail / 1024 / 1024 / 1024:.1f} GB)'
+            )
+        elif fs_key in state.keys:
+            lines.append(
+                f'✅ <b>{html.escape(s.name)}</b>: '
+                f'disk space recovered ({fs_avail / 1024 / 1024 / 1024:.1f} GB available)'
+            )
+
+    current = frozenset(keys)
+    now = time.monotonic()
+    changed = current != state.keys
+    expired = now - state.sent_at >= ALERT_RESEND
+    if not changed and (not current or not expired):
+        return
+
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text='\n'.join(lines),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except TelegramError:
+        log.exception('alert send failed')
+    else:
+        state.keys = current
+        state.sent_at = now
 
 
 async def render_loop(
@@ -128,9 +206,11 @@ async def render_loop(
     except TimeoutError:
         log.warning('timed out waiting for servers online')
     del sema
+    alert = AlertState()
 
     while True:
         text = await render_panel(states, journal, ctrl)
+        await _check_alerts(bot, chat_id, states, alert)
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
@@ -149,8 +229,8 @@ async def render_loop(
         except BadRequest as e:
             if 'not modified' not in str(e).lower():
                 log.warning('edit failed: %s', e)
-        except TelegramError as e:
-            log.warning('edit failed: %s', e)
+        except TelegramError:
+            log.exception('edit failed')
 
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(ctrl.refresh.wait(), timeout=ctrl.interval)

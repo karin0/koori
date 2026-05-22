@@ -177,9 +177,8 @@ async def run_server(
             async with server.connecter.open() as conn:
 
                 async def _get_metrics() -> MetricsSnapshot:
-                    server.metrics = metrics = parse_metrics(
-                        await conn.fetch_metrics(), server, time.time()
-                    )
+                    text = await conn.fetch_metrics()
+                    server.metrics = metrics = parse_metrics(text, server, time.time())
                     return metrics
 
                 server.update = _get_metrics
