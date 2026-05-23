@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 TG_MESSAGE_LIMIT = MessageLimit.MAX_TEXT_LENGTH
 LINE_TRIM = 180
-BAR_WIDTH = 12
+BAR_WIDTH = 14
 PARTIALS = '▏▎▍▌▋▊▉'
 STALE_AFTER = 30.0
 METRICS_FETCH_TIMEOUT = 10.0
@@ -98,14 +98,15 @@ def _pct_str(pct: float | None) -> str:
 
 
 def _gauge(label: str, pct: float | None, used: int = 0, total: int = 0) -> str:
-    sizes = f' {_fmt_size(used):>6} / {_fmt_size(total):>6}' if total > 0 else ''
-    return f'{label:<4} {_bar(pct)} {_pct_str(pct)}{sizes}'
+    return f'{label:<3} {_bar(pct)} {_pct_str(pct)}' + (
+        f' {_fmt_size(used):>6} / {_fmt_size(total):>6}' if total > 0 else ''
+    )
 
 
 def _cpu_row(avg: float | None, peak: float | None, count: int) -> str:
     cores = f' / {f'{count}x':>6}' if count > 0 else ''
     peak_s = f' {_pct_str(peak).strip():>6}' if peak is not None else ''
-    return f'CPU  {_bar_dual(avg, peak)} {_pct_str(avg)}{peak_s}{cores}'
+    return f'CPU {_bar_dual(avg, peak)} {_pct_str(avg)}{peak_s}{cores}'
 
 
 def _status_dot(s: ServerState) -> str:
@@ -157,7 +158,7 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
         _gauge('MEM', pct_mem, m.mem_used, m.mem_total),
     ]
     if m.swap_total > 0:
-        rows.append(_gauge('SWAP', pct_swap, m.swap_used, m.swap_total))
+        rows.append(_gauge('SWP', pct_swap, m.swap_used, m.swap_total))
     if m.fs_mount is not None:
         rows.append(_gauge(m.fs_mount, pct_fs, m.fs_used, m.fs_total))
     rows.append(f'NET  ↓{_fmt_bps(m.rx_bps)}   ↑{_fmt_bps(m.tx_bps)}')
@@ -167,12 +168,12 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
     if m.alerts:
         rows.append('⚠️ ' + ' | '.join(m.alerts))
 
-    return (header, '<pre>' + html.escape('\n'.join(rows)) + '</pre>')
+    return (header, f'<pre>{html.escape('\n'.join(rows))}</pre>')
 
 
 def _fit_journal(
     journal: deque[JournalEntry], budget: int, *, expanded: bool
-) -> tuple[str, int] | None:
+) -> tuple[str, int, int] | None:
     '''Fit as many entries as possible into budget eff-chars, newest-first.
 
     Default mode wraps in <blockquote expandable>…</blockquote> — visually collapsed by Telegram.
@@ -185,15 +186,16 @@ def _fit_journal(
     rows = []
     eff = 0
     for line in reversed(journal):
-        eff += len(s := _trim(line)) + bool(rows)
-        if eff > budget:
+        new_eff = eff + len(s := _trim(line)) + bool(rows)
+        if new_eff > budget:
             break
+        eff = new_eff
         rows.append(s)
 
     if rows:
         if expanded:
-            return f'<pre>{html.escape('\n'.join(reversed(rows)))}</pre>', eff
-        return f'<blockquote expandable>{html.escape('\n'.join(rows))}</blockquote>', eff
+            return f'<pre>{html.escape('\n'.join(reversed(rows)))}</pre>', eff, len(rows)
+        return f'<blockquote expandable>{html.escape('\n'.join(rows))}</blockquote>', eff, len(rows)
 
 
 async def render_panel(
@@ -214,11 +216,12 @@ async def render_panel(
     # -1 for the '\n' separator between server section and journal section.
     journal_section = _fit_journal(journal, TG_MESSAGE_LIMIT - eff - 1, expanded=ctrl.expanded)
     if journal_section is not None:
-        journal_text, journal_eff = journal_section
+        journal_text, journal_eff, journal_cnt = journal_section
         eff += journal_eff + 1
         text += '\n' + journal_text
         log.debug(
-            'render_panel: journal=%d, len=%d, eff=%d (%d)',
+            'render_panel: journal=%d/%d, len=%d, eff=%d (%d)',
+            journal_cnt,
             len(journal),
             len(text),
             eff,
