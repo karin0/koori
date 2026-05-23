@@ -73,8 +73,6 @@ def run(config_path: Path, *, dry_run: bool) -> Coroutine[Any, Any, None]:
         return _dry_run(servers, journal, ctrl)
 
     chat_id = int(config['chat_id'])
-    log.info('panel in chat=%s', chat_id)
-
     bot = build_bot()
     sema = asyncio.Semaphore(0)
     tasks = (

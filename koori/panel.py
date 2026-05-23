@@ -120,27 +120,33 @@ def _trim(line: str, n: int = LINE_TRIM) -> str:
     return line if len(line) <= n else line[: n - 1] + '…'
 
 
-async def _render_server(server: ServerState) -> Sequence[str]:
+async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str]:
     name = f'<b>{html.escape(server.name)}</b>'
     if (func := server.update) is None:
         header = '🔴 ' + name
         return (header, f'offline: {html.escape(server.error or '<unknown>')}')
 
-    t0 = time.monotonic()
-    try:
-        m = await asyncio.wait_for(func(), timeout=METRICS_FETCH_TIMEOUT)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        header = '🟡 ' + name
-        err = f'error: {html.escape(str(e))}'
-        if (m := server.metrics) is None:
-            return (header, err)
-        header += f'\n{err}'
+    if skip_update and (m := server.metrics) is not None:
+        dt = ''
+    else:
+        t0 = time.monotonic()
+        try:
+            m = await asyncio.wait_for(func(), timeout=METRICS_FETCH_TIMEOUT)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            dt = time.monotonic() - t0
+            header = '🟡 ' + name
+            err = f'error: {html.escape(str(e))}'
+            if (m := server.metrics) is None:
+                return (header, err)
+            header += f'\n{err}'
+        else:
+            dt = time.monotonic() - t0
+        dt = _fmt_duration(dt) + ', '
 
-    dt = time.monotonic() - t0
     unix = round(m.timestamp)
-    header = f'🟢 {name}  ({_fmt_duration(dt)}, <tg-time unix="{unix}" format="r">{unix}</tg-time>)'
+    header = f'🟢 {name}  ({dt}<tg-time unix="{unix}" format="r">{unix}</tg-time>)'
 
     pct_mem = 100 * m.mem_used / m.mem_total if m.mem_total > 0 else None
     pct_swap = 100 * m.swap_used / m.swap_total if m.swap_total > 0 else None
@@ -187,7 +193,8 @@ def _fit_journal(
 async def render_panel(
     servers: Sequence[ServerState], journal: deque[JournalEntry], ctrl: PanelControl
 ) -> str:
-    server_blocks = await asyncio.gather(*(_render_server(s) for s in servers))
+    server_blocks = await asyncio.gather(*(_render_server(s, ctrl.skip_update) for s in servers))
+    ctrl.skip_update = False
 
     text = '\n'.join('\n'.join(b) for b in server_blocks)
     eff = _eff_len(text)

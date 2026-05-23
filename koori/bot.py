@@ -38,6 +38,7 @@ MEM_AVAIL_ALERT = 200 << 20  # 200 MiB
 FS_AVAIL_ALERT = 2 << 30  # 2 GiB
 
 HTTP_TIMEOUT = 30
+HTTP_GET_UPDATES_TIMEOUT = 40
 
 
 @dataclass(slots=True, eq=False, match_args=False)
@@ -45,6 +46,7 @@ class PanelControl:
     interval: float = DEFAULT_INTERVAL
     expanded: bool = False
     refresh: asyncio.Event = field(default_factory=asyncio.Event)
+    skip_update: bool = False
 
 
 @dataclass(slots=True, eq=False, match_args=False)
@@ -60,17 +62,17 @@ def _keyboard(ctrl: PanelControl) -> InlineKeyboardMarkup:
         (
             (
                 InlineKeyboardButton('🐢', callback_data='slower'),
-                InlineKeyboardButton(f'↻ {now.strftime("%H:%M:%S")}', callback_data='refresh'),
+                InlineKeyboardButton(
+                    f'🔄{now.strftime('%H:%M:%S').lstrip('0')}', callback_data='refresh'
+                ),
                 InlineKeyboardButton('🐇', callback_data='faster'),
-                InlineKeyboardButton(f'{log_icon} {ctrl.interval:g}s', callback_data='log'),
+                InlineKeyboardButton(f'{log_icon}{ctrl.interval:g}s', callback_data='log'),
             ),
         )
     )
 
 
 def build_bot() -> Bot:
-    token = os.environ['TELEGRAM_BOT_TOKEN']
-
     if local_server := os.environ.get('LOCAL_SERVER'):
         base = local_server.rstrip('/')
         args = (base + '/bot', base + '/file/bot')
@@ -78,13 +80,13 @@ def build_bot() -> Bot:
         args = ()
 
     return Bot(
-        token,
+        os.environ['TELEGRAM_BOT_TOKEN'],
         *args,
         request=AiohttpRequest(
             connection_pool_size=4, client_timeout=ClientTimeout(total=HTTP_TIMEOUT)
         ),
         get_updates_request=AiohttpRequest(
-            connection_pool_size=1, client_timeout=ClientTimeout(total=HTTP_TIMEOUT)
+            connection_pool_size=1, client_timeout=ClientTimeout(total=HTTP_GET_UPDATES_TIMEOUT)
         ),
     )
 
@@ -96,9 +98,6 @@ async def ensure_panel_message(bot: Bot, chat_id: int, ctrl: PanelControl) -> in
             state = json.load(fp)
     except FileNotFoundError:
         state = {}
-    except (OSError, json.JSONDecodeError) as e:
-        state = {}
-        log.warning('state load failed: %s', e)
     else:
         if (val := state.get(key)) is not None:
             return val
@@ -214,6 +213,7 @@ async def render_loop(
         log.warning('timed out waiting for servers online')
     del sema
     alert = AlertState()
+    scheduled = None
 
     while True:
         text, _ = await asyncio.gather(
@@ -230,9 +230,10 @@ async def render_loop(
             )
         except RetryAfter as e:
             wait = e.retry_after
-            secs = wait.total_seconds() if isinstance(wait, timedelta) else float(wait)
-            log.warning('rate-limited, sleeping %ss', secs)
-            await asyncio.sleep(secs)
+            if isinstance(wait, timedelta):
+                wait = wait.total_seconds()
+            log.warning('rate-limited: %r, sleeping %ss', e, wait)
+            await asyncio.sleep(wait)
             continue
         except BadRequest as e:
             if 'not modified' not in str(e).lower():
@@ -240,9 +241,20 @@ async def render_loop(
         except TelegramError:
             log.exception('edit failed')
 
+        if scheduled:
+            timeout = max(scheduled - time.monotonic(), 1)
+            scheduled = None
+        else:
+            t0 = time.monotonic()
+            timeout = ctrl.interval
+
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(ctrl.refresh.wait(), timeout=ctrl.interval)
-        ctrl.refresh.clear()
+            await asyncio.wait_for(ctrl.refresh.wait(), timeout=timeout)
+
+        if ctrl.refresh.is_set():
+            ctrl.refresh.clear()
+            if ctrl.skip_update:
+                scheduled = t0 + ctrl.interval  # pyright: ignore[reportPossiblyUnboundVariable]
 
 
 async def update_poller(bot: Bot, chat_id: int, ctrl: PanelControl) -> None:
@@ -271,6 +283,7 @@ async def update_poller(bot: Bot, chat_id: int, ctrl: PanelControl) -> None:
                     ctrl.interval = max(MIN_INTERVAL, ctrl.interval / 2)
                 case 'log':
                     ctrl.expanded = not ctrl.expanded
+                    ctrl.skip_update = True
                 case _:
                     pass
             log.debug('ctrl: interval=%g expanded=%s', ctrl.interval, ctrl.expanded)
