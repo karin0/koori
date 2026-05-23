@@ -109,14 +109,6 @@ def _cpu_row(avg: float | None, peak: float | None, count: int) -> str:
     return f'CPU {_bar_dual(avg, peak)} {_pct_str(avg)}{peak_s}{cores}'
 
 
-def _status_dot(s: ServerState) -> str:
-    if s.update is None:
-        return '🔴'
-    if s.metrics is None or time.time() - s.metrics.timestamp > STALE_AFTER:
-        return '🟡'
-    return '🟢'
-
-
 def _trim(line: str, n: int = LINE_TRIM) -> str:
     return line if len(line) <= n else line[: n - 1] + '…'
 
@@ -146,8 +138,9 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
             dt = time.monotonic() - t0
         dt = _fmt_duration(dt) + ', '
 
-    unix = round(m.timestamp)
-    header = f'🟢 {name}  ({dt}<tg-time unix="{unix}" format="r">{unix}</tg-time>)'
+    unix = round(m.datetime.timestamp())
+    date = m.datetime.strftime('%H:%M:%S').lstrip('0')
+    header = f'🟢 {name}  ({dt}<tg-time unix="{unix}" format="r">{date}</tg-time>)'
 
     pct_mem = 100 * m.mem_used / m.mem_total if m.mem_total > 0 else None
     pct_swap = 100 * m.swap_used / m.swap_total if m.swap_total > 0 else None

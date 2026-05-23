@@ -1,8 +1,8 @@
 import asyncio
 import logging
-import time
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING, NamedTuple
 
 from prometheus_client.parser import text_string_to_metric_families
@@ -23,7 +23,7 @@ type JournalEntry = str
 
 
 class MetricsSnapshot(NamedTuple):
-    timestamp: float
+    datetime: datetime
     cpu_pct: float | None  # mean across cores
     cpu_max_pct: float | None  # busiest core
     cpu_count: int
@@ -63,7 +63,10 @@ ALERT_RULES = (
 )
 
 
-def parse_metrics(text: str, state: ServerState, now: float) -> MetricsSnapshot:
+def parse_metrics(text: str, state: ServerState) -> MetricsSnapshot:
+    now = datetime.now()
+    ts = now.timestamp()
+
     per_cpu_idle: dict[str, float] = {}
     per_cpu_total: dict[str, float] = {}
     rx_total = 0
@@ -128,7 +131,7 @@ def parse_metrics(text: str, state: ServerState, now: float) -> MetricsSnapshot:
         diagnostics.append(f'Load: {load1:.2f}')
 
     if boot_time := metrics['node_boot_time_seconds']:
-        up_secs = int(now - boot_time)
+        up_secs = int(ts - boot_time)
         days, rem = divmod(up_secs, 86400)
         hours = rem // 3600
         diagnostics.append(f'Up: {days}d {hours}h' if days else f'Up: {hours}h {rem % 3600 // 60}m')
@@ -173,11 +176,11 @@ def parse_metrics(text: str, state: ServerState, now: float) -> MetricsSnapshot:
     tx_bps: float | None = None
     if state._prev_net is not None:
         prev_ts, prev_rx, prev_tx = state._prev_net
-        dt = now - prev_ts
+        dt = ts - prev_ts
         if dt > 0:
             rx_bps = max(0.0, (rx_total - prev_rx) / dt)
             tx_bps = max(0.0, (tx_total - prev_tx) / dt)
-    state._prev_net = (now, rx_total, tx_total)
+    state._prev_net = (ts, rx_total, tx_total)
 
     if (fs := fs_by_mount.get(fs_mount := '/')) is not None:
         fs_total, avail = fs
@@ -203,7 +206,7 @@ def parse_metrics(text: str, state: ServerState, now: float) -> MetricsSnapshot:
         )
 
     return MetricsSnapshot(
-        timestamp=now,
+        datetime=now,
         cpu_pct=cpu_pct,
         cpu_max_pct=cpu_max_pct,
         cpu_count=len(per_cpu_total),
@@ -237,7 +240,7 @@ async def run_server(
 
                 async def _get_metrics() -> MetricsSnapshot:
                     text = await conn.fetch_metrics()
-                    server.metrics = metrics = parse_metrics(text, server, time.time())
+                    server.metrics = metrics = parse_metrics(text, server)
                     return metrics
 
                 server.update = _get_metrics
