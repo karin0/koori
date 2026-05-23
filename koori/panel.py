@@ -158,7 +158,8 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
     ]
     if m.swap_total > 0:
         rows.append(_gauge('SWAP', pct_swap, m.swap_used, m.swap_total))
-    rows.append(_gauge(m.fs_mount, pct_fs, m.fs_used, m.fs_total))
+    if m.fs_mount is not None:
+        rows.append(_gauge(m.fs_mount, pct_fs, m.fs_used, m.fs_total))
     rows.append(f'NET  ↓{_fmt_bps(m.rx_bps)}   ↑{_fmt_bps(m.tx_bps)}')
 
     if m.diagnostics:
