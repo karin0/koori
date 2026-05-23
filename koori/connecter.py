@@ -10,10 +10,14 @@ from typing import TYPE_CHECKING
 
 import asyncssh
 
+from .metric import COLLECTORS
+
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterable
 
-UDS_DIR = os.path.join(tempfile.gettempdir(), 'koori')
+TMP_DIR = os.path.join(tempfile.gettempdir(), __package__ or __name__)
+JOURNAL_CMD = ('journalctl', '-f', '-n', '15', '-o', 'short', '--no-pager')
+METRICS_PORT = 9100
 
 log = logging.getLogger(__name__)
 
@@ -30,8 +34,9 @@ def _build_ssh_config_files() -> tuple[str, ...]:
 
 SSH_CONFIG_FILES = _build_ssh_config_files()
 
-JOURNAL_CMD = ('journalctl', '-f', '-n', '15', '-o', 'short', '--no-pager')
-METRICS_PORT = 9100
+REQUEST = (
+    'GET /metrics?' + '&'.join('collect%5B%5D=' + c for c in COLLECTORS) + ' HTTP/1.0\r\n\r\n'
+).encode('ascii')
 
 
 class Connection(ABC):
@@ -45,23 +50,33 @@ class Connection(ABC):
         self,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]: ...
 
-    async def fetch_metrics(self) -> str:
+    async def fetch_metrics(self, name: str) -> str:
         reader, writer = await self._open_metrics()
         try:
-            writer.write(b'GET /metrics HTTP/1.0\r\n\r\n')
+            writer.write(REQUEST)
             await writer.drain()
             data = await reader.read()
         finally:
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
+        log.debug('%s: metrics: %d bytes', name, len(data))
+
+        if log.isEnabledFor(logging.DEBUG):
+            os.makedirs(TMP_DIR, exist_ok=True)
+            with open(os.path.join(TMP_DIR, f'metrics-{name}.log'), 'wb') as fp:
+                fp.write(data)
+
         head, sep, body = data.partition(b'\r\n\r\n')
         if not sep:
-            raise RuntimeError(f'malformed HTTP response: {data[:80]!r}')
+            raise RuntimeError(f'{name}: malformed HTTP response: {data[:80]!r}')
         status_line = head.split(b'\r\n', 1)[0]
         status = status_line.split(maxsplit=2)
         if len(status) < 2 or status[1] != b'200':
-            raise RuntimeError(f'HTTP {status_line.decode("latin-1", "replace")!r}')
+            raise RuntimeError(
+                f'{name}: {status_line.decode('latin-1', 'replace').strip()}: '
+                f'{body.decode('utf-8', 'replace').strip()[:200]}'
+            )
         return body.decode('utf-8', errors='replace')
 
 
@@ -132,8 +147,8 @@ class SSHConnecter(Connecter):
 
     @asynccontextmanager
     async def open(self) -> AsyncGenerator[Connection]:
-        os.makedirs(UDS_DIR, exist_ok=True)
-        uds_path = os.path.join(UDS_DIR, f'{self.host}.sock')
+        os.makedirs(TMP_DIR, exist_ok=True)
+        uds_path = os.path.join(TMP_DIR, f'{self.host}.sock')
         with contextlib.suppress(FileNotFoundError):
             os.unlink(uds_path)
 
@@ -151,7 +166,7 @@ class SSHConnecter(Connecter):
                 process = await ssh.create_process(' '.join(JOURNAL_CMD))
                 yield _SSHConnection(process.stdout, uds_path)
             finally:
-                log.debug('closing connection: %s', self.host)
+                log.debug('closing connection: %s, %s', self.host, uds_path)
                 if process is not None:
                     try:
                         process.terminate()

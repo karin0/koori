@@ -11,12 +11,14 @@ from typing import TYPE_CHECKING, Any
 from .bot import PanelControl, build_bot, render_loop, update_poller
 from .connecter import LocalConnecter, SSHConnecter
 from .panel import render_panel
-from .server import JOURNAL_BUFFER_SIZE, JournalEntry, ServerState, run_server
+from .server import JournalEntry, ServerState, run_server
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Sequence
 
     from telegram import Bot
+
+JOURNAL_BUFFER_SIZE = 50
 
 log = logging.getLogger(__name__)
 

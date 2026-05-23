@@ -4,6 +4,7 @@ import logging
 import re
 import time
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from telegram.constants import MessageLimit
@@ -128,6 +129,7 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            log.exception('%s: error fetching metrics', server.name)
             dt = time.monotonic() - t0
             header = '🟡 ' + name
             err = f'error: {html.escape(str(e))}'
@@ -138,9 +140,8 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
             dt = time.monotonic() - t0
         dt = _fmt_duration(dt) + ', '
 
-    unix = round(m.datetime.timestamp())
-    date = m.datetime.strftime('%H:%M:%S').lstrip('0')
-    header = f'🟢 {name}  ({dt}<tg-time unix="{unix}" format="r">{date}</tg-time>)'
+    date = datetime.fromtimestamp(m.timestamp).strftime('%H:%M:%S').lstrip('0')
+    header = f'🟢 {name}  ({dt}<tg-time unix="{int(m.timestamp)}" format="r">{date}</tg-time>)'
 
     pct_mem = 100 * m.mem_used / m.mem_total if m.mem_total > 0 else None
     pct_swap = 100 * m.swap_used / m.swap_total if m.swap_total > 0 else None

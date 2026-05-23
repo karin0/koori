@@ -104,8 +104,7 @@ async def ensure_panel_message(bot: Bot, chat_id: int, ctrl: PanelControl) -> in
 
     msg = await bot.send_message(
         chat_id=chat_id,
-        text='<i>koori starting…</i>',
-        parse_mode=ParseMode.HTML,
+        text='starting…',
         reply_markup=_keyboard(ctrl),
         disable_web_page_preview=True,
     )
@@ -128,10 +127,7 @@ async def wait_servers(sema: asyncio.Semaphore, iter: Iterable) -> None:
 
 
 async def _check_alerts(
-    bot: Bot,
-    chat_id: int,
-    servers: Sequence[ServerState],
-    state: AlertState,
+    bot: Bot, chat_id: int, servers: Sequence[ServerState], state: AlertState
 ) -> None:
     lines: list[str] = []
     keys: set[str] = set()
