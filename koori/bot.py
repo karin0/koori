@@ -28,15 +28,16 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 STATE_FILE = Path('state.json')
+
 DEFAULT_INTERVAL = 5.0
 MIN_INTERVAL = 1.0
 MAX_INTERVAL = 60.0
-LONG_POLL_TIMEOUT = 30  # seconds Telegram holds the request open
-HTTP_TIMEOUT = 30
-HTTP_GET_UPDATES_TIMEOUT = LONG_POLL_TIMEOUT + 10  # HTTP timeout must exceed long-poll
+ALERT_RESEND = 600.0  # re-alert every 10 min
+
 MEM_AVAIL_ALERT = 200 << 20  # 200 MiB
 FS_AVAIL_ALERT = 2 << 30  # 2 GiB
-ALERT_RESEND = 600.0  # re-alert every 10 min
+
+HTTP_TIMEOUT = 30
 
 
 @dataclass(slots=True, eq=False, match_args=False)
@@ -80,12 +81,10 @@ def build_bot() -> Bot:
         token,
         *args,
         request=AiohttpRequest(
-            connection_pool_size=4,
-            client_timeout=ClientTimeout(total=HTTP_TIMEOUT),
+            connection_pool_size=4, client_timeout=ClientTimeout(total=HTTP_TIMEOUT)
         ),
         get_updates_request=AiohttpRequest(
-            connection_pool_size=1,
-            client_timeout=ClientTimeout(total=HTTP_GET_UPDATES_TIMEOUT),
+            connection_pool_size=1, client_timeout=ClientTimeout(total=HTTP_TIMEOUT)
         ),
     )
 
@@ -139,6 +138,15 @@ async def _check_alerts(
     keys: set[str] = set()
 
     for s in servers:
+        down_key = f'{s.name}:down'
+        if s.update is None:
+            keys.add(down_key)
+            lines.append(
+                f'⚠️ <b>{html.escape(s.name)}</b>: down: {html.escape(s.error or '<unknown>')}'
+            )
+        elif down_key in state.keys:
+            lines.append(f'✅ <b>{html.escape(s.name)}</b>: recovered')
+
         m = s.metrics
         if m is None:
             continue
@@ -148,13 +156,12 @@ async def _check_alerts(
         if m.mem_total > 0 and mem_avail <= MEM_AVAIL_ALERT:
             keys.add(mem_key)
             lines.append(
-                f'\u26a0\ufe0f <b>{html.escape(s.name)}</b>: '
-                f'available memory low ({mem_avail / 1024 / 1024:.0f} MB)'
+                f'⚠️ <b>{html.escape(s.name)}</b>: available memory low ({mem_avail >> 20} MiB)'
             )
         elif mem_key in state.keys:
             lines.append(
-                f'✅ <b>{html.escape(s.name)}</b>: '
-                f'memory recovered ({mem_avail / 1024 / 1024:.0f} MB available)'
+                f'✅ <b>{html.escape(s.name)}</b>: available memory recovered ({mem_avail >> 20}'
+                ' MiB)'
             )
 
         fs_key = f'{s.name}:fs'
@@ -162,13 +169,13 @@ async def _check_alerts(
         if m.fs_total > 0 and fs_avail <= FS_AVAIL_ALERT:
             keys.add(fs_key)
             lines.append(
-                f'\u26a0\ufe0f <b>{html.escape(s.name)}</b>: '
-                f'available disk space low ({fs_avail / 1024 / 1024 / 1024:.1f} GB)'
+                f'⚠️ <b>{html.escape(s.name)}</b>: '
+                f'available disk space low ({fs_avail / (1 << 30):.1f} GiB)'
             )
         elif fs_key in state.keys:
             lines.append(
                 f'✅ <b>{html.escape(s.name)}</b>: '
-                f'disk space recovered ({fs_avail / 1024 / 1024 / 1024:.1f} GB available)'
+                f'available disk space recovered ({fs_avail / (1 << 30):.1f} GiB)'
             )
 
     current = frozenset(keys)
@@ -209,8 +216,9 @@ async def render_loop(
     alert = AlertState()
 
     while True:
-        text = await render_panel(states, journal, ctrl)
-        await _check_alerts(bot, chat_id, states, alert)
+        text, _ = await asyncio.gather(
+            render_panel(states, journal, ctrl), _check_alerts(bot, chat_id, states, alert)
+        )
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
@@ -245,9 +253,7 @@ async def update_poller(bot: Bot, chat_id: int, ctrl: PanelControl) -> None:
     while True:
         try:
             updates = await bot.get_updates(
-                offset=offset,
-                timeout=LONG_POLL_TIMEOUT,
-                allowed_updates=['callback_query'],
+                offset=offset, timeout=HTTP_TIMEOUT, allowed_updates=['callback_query']
             )
         except TelegramError:
             log.exception('get_updates failed')

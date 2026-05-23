@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import asyncssh
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterable
 
 UDS_DIR = os.path.join(tempfile.gettempdir(), 'koori')
 
@@ -38,7 +38,7 @@ class Connection(ABC):
     __slots__ = ()
 
     @abstractmethod
-    def journal_lines(self) -> AsyncIterator[str]: ...
+    def journal_lines(self) -> AsyncIterable[str]: ...
 
     @abstractmethod
     async def _open_metrics(
@@ -78,12 +78,9 @@ class _LocalConnection(Connection):
     def __init__(self, stdout: asyncio.StreamReader) -> None:
         self._stdout = stdout
 
-    async def journal_lines(self) -> AsyncIterator[str]:
-        while True:
-            line = await self._stdout.readline()
-            if not line:
-                break
-            yield line.decode('utf-8', errors='replace').rstrip()
+    async def journal_lines(self) -> AsyncIterable[str]:
+        while line := await self._stdout.readline():
+            yield line.decode('utf-8', errors='replace')
 
     async def _open_metrics(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         return await asyncio.open_connection('127.0.0.1', METRICS_PORT)
@@ -101,12 +98,16 @@ class LocalConnecter(Connecter):
             yield _LocalConnection(proc.stdout)  # type: ignore[arg-type]
         finally:
             if proc.returncode is None:
+                log.debug('terminating process: %r', proc)
                 proc.terminate()
                 try:
+                    # No need to handle CancelledError here, since it indicates the process
+                    # already exited.
                     await asyncio.wait_for(proc.wait(), timeout=3)
                 except TimeoutError:
                     proc.kill()
                     await proc.wait()
+                log.debug('process terminated: %r', proc)
 
 
 class _SSHConnection(Connection):
@@ -116,9 +117,8 @@ class _SSHConnection(Connection):
         self._stdout = stdout
         self._uds_path = uds_path
 
-    async def journal_lines(self) -> AsyncIterator[str]:
-        async for line in self._stdout:
-            yield line.rstrip()
+    def journal_lines(self) -> AsyncIterable[str]:
+        return self._stdout
 
     async def _open_metrics(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         return await asyncio.open_unix_connection(self._uds_path)
@@ -137,7 +137,13 @@ class SSHConnecter(Connecter):
         with contextlib.suppress(FileNotFoundError):
             os.unlink(uds_path)
 
-        async with asyncssh.connect(self.host, config=SSH_CONFIG_FILES) as ssh:
+        async with asyncssh.connect(
+            self.host,
+            config=SSH_CONFIG_FILES,
+            options=asyncssh.SSHClientConnectionOptions(
+                keepalive_interval=30, keepalive_count_max=3
+            ),
+        ) as ssh:
             listener = None
             process = None
             try:
@@ -150,7 +156,7 @@ class SSHConnecter(Connecter):
                     try:
                         process.terminate()
                     except OSError:
-                        log.exception('failed to terminate: %s', self.host)
+                        process = None
                 if listener is not None:
                     listener.close()
                 try:
@@ -159,4 +165,15 @@ class SSHConnecter(Connecter):
                     pass
                 except OSError:
                     log.exception('failed to unlink UDS: %s', uds_path)
+                if process is not None:
+                    try:
+                        await asyncio.wait_for(ssh.wait_closed(), timeout=10)
+                    except asyncio.CancelledError:
+                        log.debug('connection cancelled: %s', self.host)
+                        process.kill()
+                        raise
+                    except BaseException:
+                        log.exception('error while waiting for ssh to close: %s', self.host)
+                        process.kill()
+                        raise
                 log.debug('connection closed: %s', self.host)

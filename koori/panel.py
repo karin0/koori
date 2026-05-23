@@ -124,7 +124,7 @@ async def _render_server(server: ServerState) -> Sequence[str]:
     name = f'<b>{html.escape(server.name)}</b>'
     if (func := server.update) is None:
         header = '🔴 ' + name
-        return (header, f'offline: {html.escape(server.error or "starting…")}')
+        return (header, f'offline: {html.escape(server.error or '<unknown>')}')
 
     t0 = time.monotonic()
     try:

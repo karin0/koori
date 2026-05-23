@@ -126,20 +126,21 @@ def parse_metrics(text: str, state: ServerState, now: float) -> MetricsSnapshot:
         fs_total = int(size)
         fs_used = int(size - avail)
 
-    log.debug(
-        '%s: cpus=%d (avg=%s max=%s) mem=%d/%d swap=%d/%d fs_mounts=%s root_fs=%d/%d',
-        state.name,
-        len(per_cpu_total),
-        f'{cpu_pct:.1f}' if cpu_pct is not None else 'NA',
-        f'{cpu_max_pct:.1f}' if cpu_max_pct is not None else 'NA',
-        mem_total - mem_available,
-        mem_total,
-        swap_total - swap_free,
-        swap_total,
-        list(fs_by_mount.keys()),
-        fs_used,
-        fs_total,
-    )
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            '%s: cpus=%d (avg=%s max=%s) mem=%d/%d swap=%d/%d fs_mounts=%s root_fs=%d/%d',
+            state.name,
+            len(per_cpu_total),
+            f'{cpu_pct:.1f}' if cpu_pct is not None else 'NA',
+            f'{cpu_max_pct:.1f}' if cpu_max_pct is not None else 'NA',
+            mem_total - mem_available,
+            mem_total,
+            swap_total - swap_free,
+            swap_total,
+            list(fs_by_mount.keys()),
+            fs_used,
+            fs_total,
+        )
 
     return MetricsSnapshot(
         timestamp=now,
@@ -164,7 +165,7 @@ async def _journal_loop(
     journal: deque[JournalEntry],
 ) -> None:
     async for line in conn.journal_lines():
-        if line and not any(kw in line for kw in state.exclude):
+        if (line := line.strip()) and not any(kw in line for kw in state.exclude):
             journal.append(line)
 
 
@@ -191,6 +192,7 @@ async def run_server(
                 await _journal_loop(conn, server, journal)
         except asyncio.CancelledError:
             server.update = None
+            server.error = 'cancelled'
             raise
         except Exception as e:
             server.update = None
