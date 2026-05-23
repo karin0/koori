@@ -156,7 +156,11 @@ class SSHConnecter(Connecter):
             self.host,
             config=SSH_CONFIG_FILES,
             options=asyncssh.SSHClientConnectionOptions(
-                keepalive_interval=30, keepalive_count_max=3
+                keepalive_interval=30,
+                keepalive_count_max=3,
+                tcp_keepalive=True,
+                utf8_decode_errors='replace',
+                request_pty=False,
             ),
         ) as ssh:
             listener = None
