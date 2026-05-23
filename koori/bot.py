@@ -177,6 +177,14 @@ async def _check_alerts(
                 f'available disk space recovered ({fs_avail / (1 << 30):.1f} GiB)'
             )
 
+        sys_key = f'{s.name}:sys'
+        if m.alerts:
+            keys.add(sys_key)
+            detail = ' | '.join(m.alerts)
+            lines.append(f'⚠️ <b>{html.escape(s.name)}</b>: {html.escape(detail)}')
+        elif sys_key in state.keys:
+            lines.append(f'✅ <b>{html.escape(s.name)}</b>: alerts cleared')
+
     current = frozenset(keys)
     now = time.monotonic()
     changed = current != state.keys

@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 
 JOURNAL_BUFFER_SIZE = 30
 RECONNECT_BACKOFF_MAX = 60.0
+TEMP_ALERT_THRESHOLD = 80.0
 
 type JournalEntry = str
 
@@ -36,6 +37,8 @@ class MetricsSnapshot:
     fs_mount: str
     rx_bps: float | None
     tx_bps: float | None
+    diagnostics: list[str] = field(default_factory=list)
+    alerts: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True, eq=False, match_args=False)
@@ -61,6 +64,16 @@ def parse_metrics(text: str, state: ServerState, now: float) -> MetricsSnapshot:
     rx_total = 0.0
     tx_total = 0.0
     fs_by_mount: dict[str, list[float]] = {}
+
+    diagnostics: list[str] = []
+    alerts: list[str] = []
+    temp_max: float | None = None
+    temp_chip: str | None = None
+    boot_time: float | None = None
+    throttles = 0
+    conntrack_entries = 0
+    conntrack_limit = 0
+    softnet_drops = 0
 
     for family in text_string_to_metric_families(text):
         for s in family.samples:
@@ -90,6 +103,62 @@ def parse_metrics(text: str, state: ServerState, now: float) -> MetricsSnapshot:
                 case 'node_network_transmit_bytes_total':
                     if s.labels.get('device') != 'lo':
                         tx_total += s.value
+                case 'node_load1':
+                    diagnostics.append(f'Load: {s.value:.2f}')
+                case 'node_boot_time_seconds':
+                    boot_time = s.value
+                case 'node_hwmon_temp_celsius':
+                    if temp_max is None or s.value > temp_max:
+                        temp_max = s.value
+                        temp_chip = s.labels.get('chip')
+                case 'node_nf_conntrack_entries':
+                    conntrack_entries = int(s.value)
+                case 'node_nf_conntrack_entries_limit':
+                    conntrack_limit = int(s.value)
+                case 'node_vmstat_oom_kill':
+                    val = int(s.value)
+                    if val > 0:
+                        alerts.append(f'OOM: {val}')
+                case 'node_kernel_hung_tasks_total':
+                    val = int(s.value)
+                    if val > 0:
+                        alerts.append(f'Hung: {val}')
+                case 'node_cpu_package_throttles_total':
+                    throttles += int(s.value)
+                case 'node_memory_HardwareCorrupted_bytes':
+                    val = int(s.value)
+                    if val > 0:
+                        alerts.append(f'RAM Corrupted: {val >> 20} MiB')
+                case 'node_procs_blocked':
+                    val = int(s.value)
+                    if val >= 10:
+                        alerts.append(f'Blocked: {val}')
+                case 'node_softnet_dropped_total':
+                    softnet_drops += int(s.value)
+                case 'node_netstat_TcpExt_ListenOverflows':
+                    val = int(s.value)
+                    if val > 0:
+                        alerts.append(f'ListenOvfl: {val}')
+
+    if boot_time is not None:
+        up_secs = int(now - boot_time)
+        days, rem = divmod(up_secs, 86400)
+        hours = rem // 3600
+        diagnostics.append(f'Up: {days}d {hours}h' if days else f'Up: {hours}h {rem % 3600 // 60}m')
+    if temp_max is not None:
+        if temp_max >= TEMP_ALERT_THRESHOLD:
+            chip_suffix = f' ({temp_chip})' if temp_chip else ''
+            diagnostics.append(f'Temp: {temp_max:.1f}°C{chip_suffix}')
+            alerts.append(f'Temp High: {temp_max:.1f}°C')
+        else:
+            diagnostics.append(f'Temp: {temp_max:.1f}°C')
+    if conntrack_limit > 0 and conntrack_entries / conntrack_limit >= 0.8:
+        alerts.append(f'Conntrack: {conntrack_entries}/{conntrack_limit}')
+
+    if throttles > 0:
+        alerts.append(f'Throttle: {throttles}')
+    if softnet_drops > 0:
+        alerts.append(f'NetDrop: {softnet_drops}')
 
     # Per-core rates; derive mean and max.
     cpu_pct: float | None = None
@@ -156,6 +225,8 @@ def parse_metrics(text: str, state: ServerState, now: float) -> MetricsSnapshot:
         fs_mount='/',
         rx_bps=rx_bps,
         tx_bps=tx_bps,
+        diagnostics=diagnostics,
+        alerts=alerts,
     )
 
 

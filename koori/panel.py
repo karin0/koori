@@ -161,6 +161,11 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
     rows.append(_gauge(m.fs_mount, pct_fs, m.fs_used, m.fs_total))
     rows.append(f'NET  ↓{_fmt_bps(m.rx_bps)}   ↑{_fmt_bps(m.tx_bps)}')
 
+    if m.diagnostics:
+        rows.append(' | '.join(m.diagnostics))
+    if m.alerts:
+        rows.append('⚠️ ' + ' | '.join(m.alerts))
+
     return (header, '<pre>' + html.escape('\n'.join(rows)) + '</pre>')
 
 
