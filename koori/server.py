@@ -59,7 +59,7 @@ ALERT_RULES = (
     ('node_netstat_TcpExt_ListenOverflows', 1, 'ListenOvfl: {}'),
     ('node_cpu_package_throttles_total', 1, 'Throttle: {}'),
     ('node_softnet_dropped_total', 1, 'NetDrop: {}'),
-    ('node_procs_blocked', 3, 'Blocked: {}'),
+    ('node_procs_blocked', 10, 'Blocked: {}'),
 )
 
 
