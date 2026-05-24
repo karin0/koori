@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from collections import deque
     from collections.abc import Awaitable, Callable
 
-    from .connecter import Connecter, Session
+    from .dialer import Dialer, Session
 
 log = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ type JournalEntry = str
 @dataclass(slots=True, eq=False, match_args=False)
 class ServerState:
     name: str
-    connecter: Connecter
+    dialer: Dialer
     error: str | None = None
     metrics: MetricsSnapshot | None = None
     update: Callable[[], Awaitable[MetricsSnapshot]] | None = None
@@ -36,39 +36,36 @@ class ServerState:
         self.metrics = metrics = parse_metrics(self, await conn.fetch_metrics(self.name))
         return metrics
 
+    async def run(
+        self, journal: deque[JournalEntry], sema: asyncio.Semaphore | None = None
+    ) -> None:
+        backoff = 1
+        while True:
+            try:
+                async with self.dialer.open(self.name) as conn:
+                    self.update = lambda: self._update_metrics(conn)
+                    self.error = None
+                    backoff = 1
+                    log.info('%s: connected', self.name)
+                    if sema is not None:
+                        sema.release()
+                        sema = None
 
-async def _journal_loop(conn: Session, state: ServerState, journal: deque[JournalEntry]) -> None:
-    async for line in conn.journal_lines():
-        if (line := line.strip()) and not any(kw in line for kw in state.exclude):
-            journal.append(line)
+                    async for line in conn.journal_lines():
+                        if (line := line.strip()) and not any(kw in line for kw in self.exclude):
+                            journal.append(line)
 
-
-async def run_server(
-    server: ServerState, journal: deque[JournalEntry], sema: asyncio.Semaphore | None = None
-) -> None:
-    backoff = 1
-    while True:
-        try:
-            async with server.connecter.open(server.name) as conn:
-                server.update = lambda: server._update_metrics(conn)
-                server.error = None
-                backoff = 1
-                log.info('%s: connected', server.name)
-                if sema is not None:
-                    sema.release()
-                    sema = None
-                await _journal_loop(conn, server, journal)
-        except asyncio.CancelledError:
-            server.update = None
-            server.error = 'cancelled'
-            raise
-        except Exception as e:
-            server.update = None
-            server.error = f'{type(e).__name__}: {e}'
-            log.exception('%s: %s', server.name, server.error)
-        else:
-            server.update = None
-            server.error = 'journal stream ended'
-            log.warning('%s: %s', server.name, server.error)
-        await asyncio.sleep(backoff)
-        backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX)
+            except asyncio.CancelledError:
+                self.update = None
+                self.error = 'cancelled'
+                raise
+            except Exception as e:
+                self.update = None
+                self.error = f'{type(e).__name__}: {e}'
+                log.exception('%s: %s', self.name, self.error)
+            else:
+                self.update = None
+                self.error = 'journal stream ended'
+                log.warning('%s: %s', self.name, self.error)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff << 1, RECONNECT_BACKOFF_MAX)

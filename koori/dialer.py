@@ -196,7 +196,7 @@ class Session(ABC):
             self._conn = None
 
 
-class Connecter(ABC):
+class Dialer(ABC):
     __slots__ = ()
 
     @abstractmethod
@@ -218,7 +218,7 @@ class LocalSession(Session):
         return asyncio.open_connection('127.0.0.1', METRICS_PORT)
 
 
-class LocalConnecter(Connecter):
+class LocalDialer(Dialer):
     __slots__ = ()
 
     @asynccontextmanager
@@ -258,7 +258,7 @@ class SSHSession(Session):
         return self._ssh.open_connection('127.0.0.1', METRICS_PORT, encoding=None)
 
 
-class SSHConnecter(Connecter):
+class SSHDialer(Dialer):
     __slots__ = ('host',)
 
     def __init__(self, host: str) -> None:

@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .bot import PanelControl, build_bot, render_loop, update_poller
-from .connecter import LocalConnecter, SSHConnecter
+from .dialer import LocalDialer, SSHDialer
 from .panel import render_panel
-from .server import JournalEntry, ServerState, run_server
+from .server import JournalEntry, ServerState
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Sequence
@@ -28,20 +28,20 @@ def _build_server(spec: dict[str, Any]) -> ServerState:
 
     match spec.get('kind'):
         case 'local':
-            connector = LocalConnecter()
+            dialer = LocalDialer()
         case 'ssh' | None:
-            connector = SSHConnecter(spec.get('host', name))
+            dialer = SSHDialer(spec.get('host', name))
         case other:
-            raise ValueError(f'unknown connecter kind: {other!r}')
+            raise ValueError(f'unknown dialer kind: {other!r}')
 
-    return ServerState(name, connector, exclude=list(spec.get('exclude') or []))
+    return ServerState(name, dialer, exclude=list(spec.get('exclude') or []))
 
 
 async def _dry_run(
     servers: Sequence[ServerState], journal: deque[JournalEntry], ctrl: PanelControl
 ) -> None:
     # ruff: noqa: T201
-    tasks = tuple(asyncio.create_task(run_server(s, journal)) for s in servers)
+    tasks = tuple(asyncio.create_task(s.run(journal)) for s in servers)
     try:
         while True:
             print('\x1b[2J\x1b[H', end='')
@@ -78,10 +78,7 @@ def run(config_path: Path, *, dry_run: bool) -> Coroutine[Any, Any, None]:
     bot = build_bot()
     sema = asyncio.Semaphore(0)
     tasks = (
-        *(
-            asyncio.create_task(run_server(s, journal, sema), name=f'server:{s.name}')
-            for s in servers
-        ),
+        *(asyncio.create_task(s.run(journal, sema), name=f'server:{s.name}') for s in servers),
         asyncio.create_task(render_loop(bot, chat_id, servers, journal, ctrl, sema), name='render'),
         asyncio.create_task(update_poller(bot, chat_id, ctrl), name='poller'),
     )
