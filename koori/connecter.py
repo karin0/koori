@@ -6,26 +6,15 @@ import tempfile
 
 from abc import ABC, abstractmethod
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
+import aiohttp
 import asyncssh
 
 from .metric import COLLECTORS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterable
-
-
-class StreamReaderProtocol(Protocol):
-    async def read(self, n: int = -1) -> bytes: ...
-
-
-class StreamWriterProtocol(Protocol):
-    def write(self, data: bytes) -> None: ...
-    async def drain(self) -> None: ...
-    def close(self) -> None: ...
-    async def wait_closed(self) -> None: ...
-
 
 TMP_DIR = os.path.join(tempfile.gettempdir(), __package__ or __name__)
 JOURNAL_CMD = ('journalctl', '-f', '-n', '15', '-o', 'short', '--no-pager')
@@ -46,50 +35,31 @@ def _build_ssh_config_files() -> tuple[str, ...]:
 
 SSH_CONFIG_FILES = _build_ssh_config_files()
 
-REQUEST = (
-    'GET /metrics?' + '&'.join('collect%5B%5D=' + c for c in COLLECTORS) + ' HTTP/1.0\r\n\r\n'
-).encode('ascii')
-
 
 class Connection(ABC):
-    __slots__ = ()
+    __slots__ = ('_session', '_url')
+
+    def __init__(self, session: aiohttp.ClientSession, url: str) -> None:
+        self._session = session
+        self._url = url
 
     @abstractmethod
     def journal_lines(self) -> AsyncIterable[str]: ...
 
-    @abstractmethod
-    async def _open_metrics(
-        self,
-    ) -> tuple[StreamReaderProtocol, StreamWriterProtocol]: ...
-
     async def fetch_metrics(self, name: str) -> str:
-        reader, writer = await self._open_metrics()
-        try:
-            writer.write(REQUEST)
-            await writer.drain()
-            data = await reader.read()
-        finally:
-            writer.close()
-            with contextlib.suppress(OSError):
-                await writer.wait_closed()
+        params = [('collect[]', c) for c in COLLECTORS]
+        async with self._session.get(self._url, params=params) as resp:
+            resp.raise_for_status()
+            data = await resp.text(errors='replace')
+
         log.debug('%s: metrics: %d bytes', name, len(data))
 
         if log.isEnabledFor(logging.DEBUG):
             os.makedirs(TMP_DIR, exist_ok=True)
-            with open(os.path.join(TMP_DIR, f'metrics-{name}.log'), 'wb') as fp:
+            with open(os.path.join(TMP_DIR, f'metrics-{name}.log'), 'w', encoding='utf-8') as fp:
                 fp.write(data)
 
-        head, sep, body = data.partition(b'\r\n\r\n')
-        if not sep:
-            raise RuntimeError(f'{name}: malformed HTTP response: {data[:80]!r}')
-        status_line = head.split(b'\r\n', 1)[0]
-        status = status_line.split(maxsplit=2)
-        if len(status) < 2 or status[1] != b'200':
-            raise RuntimeError(
-                f'{name}: {status_line.decode('latin-1', 'replace').strip()}: '
-                f'{body.decode('utf-8', 'replace').strip()[:200]}'
-            )
-        return body.decode('utf-8', errors='replace')
+        return data
 
 
 class Connecter(ABC):
@@ -102,15 +72,13 @@ class Connecter(ABC):
 class _LocalConnection(Connection):
     __slots__ = ('_stdout',)
 
-    def __init__(self, stdout: asyncio.StreamReader) -> None:
+    def __init__(self, stdout: asyncio.StreamReader, session: aiohttp.ClientSession) -> None:
+        super().__init__(session, f'http://127.0.0.1:{METRICS_PORT}/metrics')
         self._stdout = stdout
 
     async def journal_lines(self) -> AsyncIterable[str]:
         while line := await self._stdout.readline():
             yield line.decode('utf-8', errors='replace')
-
-    async def _open_metrics(self) -> tuple[StreamReaderProtocol, StreamWriterProtocol]:
-        return await asyncio.open_connection('127.0.0.1', METRICS_PORT)
 
 
 class LocalConnecter(Connecter):
@@ -121,34 +89,30 @@ class LocalConnecter(Connecter):
         proc = await asyncio.create_subprocess_exec(
             *JOURNAL_CMD, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
         )
-        try:
-            yield _LocalConnection(proc.stdout)  # type: ignore[arg-type]
-        finally:
-            if proc.returncode is None:
-                log.debug('%s: terminating process: %r', name, proc)
-                proc.terminate()
-                try:
-                    # No need to handle CancelledError here, since it indicates the process
-                    # already exited.
-                    await asyncio.wait_for(proc.wait(), timeout=3)
-                except TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-                log.debug('%s: process terminated: %r', name, proc)
+        async with aiohttp.ClientSession() as session:
+            try:
+                yield _LocalConnection(proc.stdout, session)  # type: ignore[arg-type]
+            finally:
+                if proc.returncode is None:
+                    log.debug('%s: terminating process: %r', name, proc)
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=3)
+                    except TimeoutError:
+                        proc.kill()
+                        await proc.wait()
+                    log.debug('%s: process terminated: %r', name, proc)
 
 
 class _SSHConnection(Connection):
-    __slots__ = ('_stdout', '_ssh')
+    __slots__ = ('_stdout',)
 
-    def __init__(self, stdout: asyncssh.SSHReader[str], ssh: asyncssh.SSHClientConnection) -> None:
+    def __init__(self, stdout: asyncssh.SSHReader[str], session: aiohttp.ClientSession) -> None:
+        super().__init__(session, 'http://localhost/metrics')
         self._stdout = stdout
-        self._ssh = ssh
 
     def journal_lines(self) -> AsyncIterable[str]:
         return self._stdout
-
-    async def _open_metrics(self) -> tuple[StreamReaderProtocol, StreamWriterProtocol]:
-        return await self._ssh.open_connection('127.0.0.1', METRICS_PORT, encoding=None)
 
 
 class SSHConnecter(Connecter):
@@ -159,6 +123,11 @@ class SSHConnecter(Connecter):
 
     @asynccontextmanager
     async def open(self, name: str) -> AsyncGenerator[Connection]:
+        os.makedirs(TMP_DIR, exist_ok=True)
+        uds_path = os.path.join(TMP_DIR, f'{name}.sock')
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(uds_path)
+
         async with asyncssh.connect(
             self.host,
             config=SSH_CONFIG_FILES,
@@ -173,17 +142,29 @@ class SSHConnecter(Connecter):
                 preferred_auth='publickey',
             ),
         ) as ssh:
+            listener = None
             process = None
             try:
+                listener = await ssh.forward_local_path_to_port(uds_path, '127.0.0.1', METRICS_PORT)
                 process = await ssh.create_process(' '.join(JOURNAL_CMD))
-                yield _SSHConnection(process.stdout, ssh)
+                connector = aiohttp.UnixConnector(path=uds_path)
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    yield _SSHConnection(process.stdout, session)
             finally:
-                log.debug('%s: closing connection', name)
+                log.debug('%s: closing connection: %s', name, uds_path)
                 if process is not None:
                     try:
                         process.terminate()
                     except OSError:
                         process = None
+                if listener is not None:
+                    listener.close()
+                try:
+                    os.unlink(uds_path)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    log.exception('%s: failed to unlink UDS: %s', name, uds_path)
                 if process is not None:
                     try:
                         await asyncio.wait_for(ssh.wait_closed(), timeout=10)
