@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from collections import deque
     from collections.abc import Awaitable, Callable
 
-    from .connecter import Connecter, Connection
+    from .connecter import Connecter, Session
 
 log = logging.getLogger(__name__)
 
@@ -32,12 +32,12 @@ class ServerState:
     _prev_cpu: dict[str, tuple[float, float]] = field(default_factory=dict)
     _prev_net: tuple[float, float, float] | None = None  # (ts, rx, tx)
 
-    async def _update_metrics(self, conn: Connection) -> MetricsSnapshot:
+    async def _update_metrics(self, conn: Session) -> MetricsSnapshot:
         self.metrics = metrics = parse_metrics(self, await conn.fetch_metrics(self.name))
         return metrics
 
 
-async def _journal_loop(conn: Connection, state: ServerState, journal: deque[JournalEntry]) -> None:
+async def _journal_loop(conn: Session, state: ServerState, journal: deque[JournalEntry]) -> None:
     async for line in conn.journal_lines():
         if (line := line.strip()) and not any(kw in line for kw in state.exclude):
             journal.append(line)

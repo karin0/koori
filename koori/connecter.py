@@ -124,15 +124,36 @@ async def _read_http_response(reader: StreamReader) -> bytes:
     return await reader.read()
 
 
-class Connection(ABC):
+type StreamPair = tuple[StreamReader, StreamWriter]
+
+
+class HTTPConnection:
     __slots__ = ('_reader', '_writer')
 
-    _reader: StreamReader | None
-    _writer: StreamWriter | None
+    _reader: StreamReader
+    _writer: StreamWriter
+
+    def __init__(self, stream: StreamPair) -> None:
+        self._reader, self._writer = stream
+
+    async def request(self, request: bytes) -> bytes:
+        self._writer.write(request)
+        await self._writer.drain()
+        return await _read_http_response(self._reader)
+
+    async def close(self) -> None:
+        self._writer.close()
+        with contextlib.suppress(OSError):
+            await self._writer.wait_closed()
+
+
+class Session(ABC):
+    __slots__ = ('_conn',)
+
+    _conn: HTTPConnection | None
 
     def __init__(self) -> None:
-        self._reader = None
-        self._writer = None
+        self._conn = None
 
     @abstractmethod
     def journal_lines(self) -> AsyncIterable[str]: ...
@@ -144,14 +165,11 @@ class Connection(ABC):
         # Self-healing retry loop: retry once on a fresh connection if the persistent one was closed
         for attempt in range(2):
             try:
-                if self._writer is None or self._reader is None:
+                if self._conn is None:
                     log.info('%s: connecting (attempt %d)', name, attempt)
-                    self._reader, self._writer = await self._connect_stream()
+                    self._conn = HTTPConnection(await self._connect_stream())
 
-                self._writer.write(REQUEST)
-                await self._writer.drain()
-
-                data = await _read_http_response(self._reader)
+                data = await self._conn.request(REQUEST)
                 break
             except (OSError, EOFError, RuntimeError, ValueError) as e:
                 log.exception('%s: http error (attempt %d)', name, attempt)
@@ -172,23 +190,20 @@ class Connection(ABC):
         return data.decode('utf-8', errors='replace')
 
     async def close_metrics(self, name: str) -> None:
-        if self._writer is not None:
-            self._writer.close()
-            with contextlib.suppress(OSError):
-                await self._writer.wait_closed()
+        if self._conn is not None:
+            await self._conn.close()
             log.debug('%s: metrics connection closed', name)
-            self._reader = None
-            self._writer = None
+            self._conn = None
 
 
 class Connecter(ABC):
     __slots__ = ()
 
     @abstractmethod
-    def open(self, name: str) -> AbstractAsyncContextManager[Connection]: ...
+    def open(self, name: str) -> AbstractAsyncContextManager[Session]: ...
 
 
-class _LocalConnection(Connection):
+class LocalSession(Session):
     __slots__ = ('_stdout',)
 
     def __init__(self, stdout: asyncio.StreamReader) -> None:
@@ -199,7 +214,7 @@ class _LocalConnection(Connection):
         while line := await self._stdout.readline():
             yield line.decode('utf-8', errors='replace')
 
-    def _connect_stream(self) -> Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
+    def _connect_stream(self) -> Awaitable[StreamPair]:
         return asyncio.open_connection('127.0.0.1', METRICS_PORT)
 
 
@@ -207,12 +222,12 @@ class LocalConnecter(Connecter):
     __slots__ = ()
 
     @asynccontextmanager
-    async def open(self, name: str) -> AsyncGenerator[Connection]:
+    async def open(self, name: str) -> AsyncGenerator[Session]:
         proc = await asyncio.create_subprocess_exec(
             *JOURNAL_CMD, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
         )
         assert proc.stdout is not None
-        conn = _LocalConnection(proc.stdout)
+        conn = LocalSession(proc.stdout)
         try:
             yield conn
         finally:
@@ -228,7 +243,7 @@ class LocalConnecter(Connecter):
             await conn.close_metrics(name)
 
 
-class _SSHConnection(Connection):
+class SSHSession(Session):
     __slots__ = ('_stdout', '_ssh')
 
     def __init__(self, stdout: asyncssh.SSHReader[str], ssh: asyncssh.SSHClientConnection) -> None:
@@ -239,9 +254,7 @@ class _SSHConnection(Connection):
     def journal_lines(self) -> AsyncIterable[str]:
         return self._stdout
 
-    def _connect_stream(
-        self,
-    ) -> Awaitable[tuple[asyncssh.SSHReader[bytes], asyncssh.SSHWriter[bytes]]]:
+    def _connect_stream(self) -> Awaitable[StreamPair]:
         return self._ssh.open_connection('127.0.0.1', METRICS_PORT, encoding=None)
 
 
@@ -252,7 +265,7 @@ class SSHConnecter(Connecter):
         self.host = host
 
     @asynccontextmanager
-    async def open(self, name: str) -> AsyncGenerator[Connection]:
+    async def open(self, name: str) -> AsyncGenerator[Session]:
         async with asyncssh.connect(
             self.host,
             config=SSH_CONFIG_FILES,
@@ -271,7 +284,7 @@ class SSHConnecter(Connecter):
             conn = None
             try:
                 process = await ssh.create_process(' '.join(JOURNAL_CMD))
-                conn = _SSHConnection(process.stdout, ssh)
+                conn = SSHSession(process.stdout, ssh)
                 yield conn
             finally:
                 log.debug('%s: closing connection', name)
