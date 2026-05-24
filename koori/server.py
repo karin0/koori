@@ -49,7 +49,7 @@ async def run_server(
     backoff = 1
     while True:
         try:
-            async with server.connecter.open() as conn:
+            async with server.connecter.open(server.name) as conn:
                 server.update = lambda: server._update_metrics(conn)
                 server.error = None
                 backoff = 1
