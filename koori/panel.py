@@ -20,10 +20,9 @@ log = logging.getLogger(__name__)
 
 TG_MESSAGE_LIMIT = MessageLimit.MAX_TEXT_LENGTH
 LINE_TRIM = 180
-BAR_WIDTH = 14
+BAR_WIDTH = 12
 PARTIALS = '▏▎▍▌▋▊▉'
-STALE_AFTER = 30.0
-METRICS_FETCH_TIMEOUT = 10.0
+METRICS_FETCH_TIMEOUT = 10
 
 _TAG_RE = re.compile(r'<[^>]+>')
 
@@ -141,7 +140,10 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
         dt = _fmt_duration(dt) + ', '
 
     date = datetime.fromtimestamp(m.timestamp).strftime('%H:%M:%S').lstrip('0')
-    header = f'🟢 {name}  ({dt}<tg-time unix="{int(m.timestamp)}" format="r">{date}</tg-time>)'
+    header = (
+        f'🟢 {name}  ({dt}{_fmt_duration(m.scrape_time)}, '
+        f'<tg-time unix="{int(m.timestamp)}" format="r">{date}</tg-time>)'
+    )
 
     pct_mem = 100 * m.mem_used / m.mem_total if m.mem_total > 0 else None
     pct_swap = 100 * m.swap_used / m.swap_total if m.swap_total > 0 else None
@@ -157,8 +159,21 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
         rows.append(_gauge(m.fs_mount, pct_fs, m.fs_used, m.fs_total))
     rows.append(f'NET  ↓{_fmt_bps(m.rx_bps)}   ↑{_fmt_bps(m.tx_bps)}')
 
-    if m.diagnostics:
-        rows.append(' | '.join(m.diagnostics))
+    days, rem = divmod(int(m.timestamp - m.boot_time), 86400)
+    hours, rem = divmod(rem, 3600)
+    parts = [
+        days and f'{days}d',
+        hours and f'{hours}h',
+        not days and rem >= 60 and f'{rem // 60}m',
+    ]
+    if not parts:
+        parts.append(f'{rem}s')
+
+    ext = [f'Load: {m.load1:.2f} | Up: ', ' '.join(p for p in parts if p)]
+    if m.temp:
+        ext.append(f' | {m.temp:.1f}°C')
+    rows.append(''.join(ext))
+
     if m.alerts:
         rows.append('⚠️ ' + ' | '.join(m.alerts))
 

@@ -39,6 +39,7 @@ ALERT_RULES = (
 
 METRICS_KEYS = (
     'node_time_seconds',
+    'node_scrape_collector_duration_seconds',
     'node_load1',
     'node_boot_time_seconds',
     'node_memory_MemTotal_bytes',
@@ -58,11 +59,13 @@ EXT_KEYS = (
     'node_network_receive_bytes_total',
     'node_network_transmit_bytes_total',
     'node_hwmon_temp_celsius',
+    'node_scrape_collector_success',
 )
 
 
 class MetricsSnapshot(NamedTuple):
     timestamp: float
+    scrape_time: float
     cpu_pct: float | None  # mean across cores
     cpu_max_pct: float | None  # busiest core
     cpu_count: int
@@ -75,7 +78,9 @@ class MetricsSnapshot(NamedTuple):
     fs_mount: str | None
     rx_bps: float | None
     tx_bps: float | None
-    diagnostics: list[str]
+    temp: float | None
+    load1: float
+    boot_time: float
     alerts: list[str]
 
 
@@ -86,7 +91,6 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
     tx_total = 0
     fs_by_mount: dict[str, list[int]] = {}
 
-    diagnostics: list[str] = []
     alerts: list[str] = []
     temp_max: float | None = None
     temp_chip: str | None = None
@@ -95,7 +99,7 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
     metrics: dict[str, float] = dict.fromkeys(METRICS_KEYS, 0)
 
     if log.isEnabledFor(logging.DEBUG):
-        missing_keys = set(metrics.keys())
+        missing_keys = set(metrics)
         missing_keys.update(EXT_KEYS)
     else:
         missing_keys = None
@@ -126,6 +130,11 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
                     if temp_max is None or s.value > temp_max:
                         temp_max = s.value
                         temp_chip = s.labels.get('chip')
+                case 'node_scrape_collector_success':
+                    if not s.value:
+                        log.warning(
+                            '%s: collector failed: %s', state.name, s.labels.get('collector')
+                        )
                 case _:
                     if (old := metrics.get(s.name)) is not None:
                         # Accumulate in case there are multiple samples (e.g. CPU package throttles)
@@ -143,20 +152,8 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
         ts = time.time()
         log.warning('%s: missing node_time_seconds metric', state.name)
 
-    if load1 := metrics['node_load1']:
-        diagnostics.append(f'Load: {load1:.2f}')
-
-    if boot_time := metrics['node_boot_time_seconds']:
-        up_secs = int(ts - boot_time)
-        days, rem = divmod(up_secs, 86400)
-        hours = rem // 3600
-        diagnostics.append(f'Up: {days}d {hours}h' if days else f'Up: {hours}h {rem % 3600 // 60}m')
-
-    if temp_max is not None:
-        if temp_max >= TEMP_ALERT_THRESHOLD:
-            alerts.append(f'Temp: {temp_max:.1f}°C' + f' ({temp_chip})' if temp_chip else '')
-        else:
-            diagnostics.append(f'Temp: {temp_max:.1f}°C')
+    if temp_max is not None and temp_max >= TEMP_ALERT_THRESHOLD:
+        alerts.append(f'{temp_chip or 'Temp'}: {temp_max:.1f}°C')
 
     for mname, threshold, name in ALERT_RULES:
         if (val := int(metrics[mname])) >= threshold:
@@ -223,6 +220,7 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
 
     return MetricsSnapshot(
         timestamp=ts,
+        scrape_time=metrics['node_scrape_collector_duration_seconds'],
         cpu_pct=cpu_pct,
         cpu_max_pct=cpu_max_pct,
         cpu_count=len(per_cpu_total),
@@ -235,6 +233,8 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
         fs_mount=fs_mount,
         rx_bps=rx_bps,
         tx_bps=tx_bps,
-        diagnostics=diagnostics,
+        load1=metrics['node_load1'],
+        boot_time=metrics['node_boot_time_seconds'],
+        temp=temp_max,
         alerts=alerts,
     )
