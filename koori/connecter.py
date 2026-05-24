@@ -6,7 +6,7 @@ import tempfile
 
 from abc import ABC, abstractmethod
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import asyncssh
 
@@ -14,6 +14,18 @@ from .metric import COLLECTORS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterable
+
+
+class StreamReaderProtocol(Protocol):
+    async def read(self, n: int = -1) -> bytes: ...
+
+
+class StreamWriterProtocol(Protocol):
+    def write(self, data: bytes) -> None: ...
+    async def drain(self) -> None: ...
+    def close(self) -> None: ...
+    async def wait_closed(self) -> None: ...
+
 
 TMP_DIR = os.path.join(tempfile.gettempdir(), __package__ or __name__)
 JOURNAL_CMD = ('journalctl', '-f', '-n', '15', '-o', 'short', '--no-pager')
@@ -48,7 +60,7 @@ class Connection(ABC):
     @abstractmethod
     async def _open_metrics(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]: ...
+    ) -> tuple[StreamReaderProtocol, StreamWriterProtocol]: ...
 
     async def fetch_metrics(self, name: str) -> str:
         reader, writer = await self._open_metrics()
@@ -97,7 +109,7 @@ class _LocalConnection(Connection):
         while line := await self._stdout.readline():
             yield line.decode('utf-8', errors='replace')
 
-    async def _open_metrics(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    async def _open_metrics(self) -> tuple[StreamReaderProtocol, StreamWriterProtocol]:
         return await asyncio.open_connection('127.0.0.1', METRICS_PORT)
 
 
@@ -126,17 +138,17 @@ class LocalConnecter(Connecter):
 
 
 class _SSHConnection(Connection):
-    __slots__ = ('_stdout', '_uds_path')
+    __slots__ = ('_stdout', '_ssh')
 
-    def __init__(self, stdout: asyncssh.SSHReader[str], uds_path: str) -> None:
+    def __init__(self, stdout: asyncssh.SSHReader[str], ssh: asyncssh.SSHClientConnection) -> None:
         self._stdout = stdout
-        self._uds_path = uds_path
+        self._ssh = ssh
 
     def journal_lines(self) -> AsyncIterable[str]:
         return self._stdout
 
-    async def _open_metrics(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        return await asyncio.open_unix_connection(self._uds_path)
+    async def _open_metrics(self) -> tuple[StreamReaderProtocol, StreamWriterProtocol]:
+        return await self._ssh.open_connection('127.0.0.1', METRICS_PORT, encoding=None)
 
 
 class SSHConnecter(Connecter):
@@ -147,11 +159,6 @@ class SSHConnecter(Connecter):
 
     @asynccontextmanager
     async def open(self, name: str) -> AsyncGenerator[Connection]:
-        os.makedirs(TMP_DIR, exist_ok=True)
-        uds_path = os.path.join(TMP_DIR, f'{name}.sock')
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(uds_path)
-
         async with asyncssh.connect(
             self.host,
             config=SSH_CONFIG_FILES,
@@ -166,27 +173,17 @@ class SSHConnecter(Connecter):
                 preferred_auth='publickey',
             ),
         ) as ssh:
-            listener = None
             process = None
             try:
-                listener = await ssh.forward_local_path_to_port(uds_path, '127.0.0.1', METRICS_PORT)
                 process = await ssh.create_process(' '.join(JOURNAL_CMD))
-                yield _SSHConnection(process.stdout, uds_path)
+                yield _SSHConnection(process.stdout, ssh)
             finally:
-                log.debug('%s: closing connection: %s', name, uds_path)
+                log.debug('%s: closing connection', name)
                 if process is not None:
                     try:
                         process.terminate()
                     except OSError:
                         process = None
-                if listener is not None:
-                    listener.close()
-                try:
-                    os.unlink(uds_path)
-                except FileNotFoundError:
-                    pass
-                except OSError:
-                    log.exception('%s: failed to unlink UDS: %s', name, uds_path)
                 if process is not None:
                     try:
                         await asyncio.wait_for(ssh.wait_closed(), timeout=10)
