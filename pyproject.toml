@@ -53,6 +53,7 @@ ignore = [
     "TRY301",
     "TRY400",
 
+    "S101",
     "PLR",
     "ASYNC230",
     "ASYNC240",
