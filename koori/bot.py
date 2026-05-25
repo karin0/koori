@@ -133,6 +133,8 @@ async def _check_alerts(
     keys: set[str] = set()
 
     for s in servers:
+        old_lines = len(lines)
+
         down_key = f'{s.name}:down'
         if s.update is None:
             keys.add(down_key)
@@ -180,6 +182,10 @@ async def _check_alerts(
             lines.append(f'⚠️ <b>{html.escape(s.name)}</b>: {html.escape(detail)}')
         elif sys_key in state.keys:
             lines.append(f'✅ <b>{html.escape(s.name)}</b>: alerts cleared')
+
+        if len(lines) != old_lines:
+            date = datetime.fromtimestamp(m.timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            lines.append(f'⏱️ <tg-time unix="{int(m.timestamp)}" format="wdT">{date}</tg-time>')
 
     current = frozenset(keys)
     now = time.monotonic()
