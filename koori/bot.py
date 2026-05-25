@@ -36,6 +36,7 @@ ALERT_RESEND = 600.0  # re-alert every 10 min
 
 MEM_AVAIL_ALERT = 200 << 20  # 200 MiB
 FS_AVAIL_ALERT = 2 << 30  # 2 GiB
+TEMP_ALERT = 80
 
 HTTP_TIMEOUT = 30
 HTTP_GET_UPDATES_TIMEOUT = 40
@@ -135,14 +136,18 @@ async def _check_alerts(
     for s in servers:
         old_lines = len(lines)
 
+        def recover(msg: str, symbol: str = '✅') -> None:
+            lines.append(f'{symbol} <b>{html.escape(s.name)}</b>: {html.escape(msg)}')  # noqa: B023
+
+        def alert(key: str, msg: str):
+            keys.add(key)
+            recover(msg, symbol='⚠️')
+
         down_key = f'{s.name}:down'
         if s.update is None:
-            keys.add(down_key)
-            lines.append(
-                f'⚠️ <b>{html.escape(s.name)}</b>: down: {html.escape(s.error or '<unknown>')}'
-            )
+            alert(down_key, f'down: {s.error or '<unknown error>'}')
         elif down_key in state.keys:
-            lines.append(f'✅ <b>{html.escape(s.name)}</b>: recovered')
+            recover('back online')
 
         m = s.metrics
         if m is None:
@@ -151,37 +156,29 @@ async def _check_alerts(
         mem_key = f'{s.name}:mem'
         mem_avail = m.mem_total - m.mem_used
         if m.mem_total > 0 and mem_avail <= MEM_AVAIL_ALERT:
-            keys.add(mem_key)
-            lines.append(
-                f'⚠️ <b>{html.escape(s.name)}</b>: available memory low ({mem_avail >> 20} MiB)'
-            )
+            alert(mem_key, f'available memory low ({mem_avail >> 20} MiB)')
         elif mem_key in state.keys:
-            lines.append(
-                f'✅ <b>{html.escape(s.name)}</b>: available memory recovered ({mem_avail >> 20}'
-                ' MiB)'
-            )
+            recover(f'available memory recovered ({mem_avail >> 20} MiB)')
 
         fs_key = f'{s.name}:fs'
         fs_avail = m.fs_total - m.fs_used
         if m.fs_total > 0 and fs_avail <= FS_AVAIL_ALERT:
-            keys.add(fs_key)
-            lines.append(
-                f'⚠️ <b>{html.escape(s.name)}</b>: '
-                f'available disk space low ({fs_avail / (1 << 30):.1f} GiB)'
-            )
+            alert(fs_key, f'available disk space low ({fs_avail / (1 << 30):.1f} GiB)')
         elif fs_key in state.keys:
-            lines.append(
-                f'✅ <b>{html.escape(s.name)}</b>: '
-                f'available disk space recovered ({fs_avail / (1 << 30):.1f} GiB)'
-            )
+            recover(f'available disk space recovered ({fs_avail / (1 << 30):.1f} GiB)')
+
+        if m.temp is not None:
+            temp_key = f'{s.name}:temp'
+            if m.temp >= TEMP_ALERT:
+                alert(temp_key, f'{m.temp_chip or '<unknown sensor>'}: {m.temp:.1f}°C')
+            elif temp_key in state.keys:
+                recover(f'{m.temp_chip or '<unknown sensor>'}: {m.temp:.1f}°C')
 
         sys_key = f'{s.name}:sys'
         if m.alerts:
-            keys.add(sys_key)
-            detail = ' | '.join(m.alerts)
-            lines.append(f'⚠️ <b>{html.escape(s.name)}</b>: {html.escape(detail)}')
+            alert(sys_key, ' | '.join(m.alerts))
         elif sys_key in state.keys:
-            lines.append(f'✅ <b>{html.escape(s.name)}</b>: alerts cleared')
+            recover('alerts cleared')
 
         if len(lines) != old_lines:
             date = datetime.fromtimestamp(m.timestamp).strftime('%Y-%m-%d %H:%M:%S')

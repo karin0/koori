@@ -10,8 +10,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-TEMP_ALERT_THRESHOLD = 80
-
 COLLECTORS = (
     'cpu',
     'meminfo',
@@ -79,6 +77,7 @@ class MetricsSnapshot(NamedTuple):
     rx_bps: float | None
     tx_bps: float | None
     temp: float | None
+    temp_chip: str | None
     load1: float
     boot_time: float
     alerts: list[str]
@@ -151,9 +150,6 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
     if not (ts := metrics['node_time_seconds']):
         ts = time.time()
         log.warning('%s: missing node_time_seconds metric', state.name)
-
-    if temp_max is not None and temp_max >= TEMP_ALERT_THRESHOLD:
-        alerts.append(f'{temp_chip or 'Temp'}: {temp_max:.1f}°C')
 
     for mname, threshold, name in ALERT_RULES:
         if (val := int(metrics[mname])) >= threshold:
@@ -236,5 +232,6 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
         load1=metrics['node_load1'],
         boot_time=metrics['node_boot_time_seconds'],
         temp=temp_max,
+        temp_chip=temp_chip,
         alerts=alerts,
     )
