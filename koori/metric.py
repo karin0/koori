@@ -67,6 +67,7 @@ class MetricsSnapshot(NamedTuple):
     cpu_pct: float | None  # mean across cores
     cpu_max_pct: float | None  # busiest core
     cpu_count: int
+    cpu_seconds: dict[str, tuple[float, float]]
     mem_used: int
     mem_total: int
     swap_used: int
@@ -74,6 +75,8 @@ class MetricsSnapshot(NamedTuple):
     fs_used: int
     fs_total: int
     fs_mount: str | None
+    rx: float
+    tx: float
     rx_bps: float | None
     tx_bps: float | None
     temp: float | None
@@ -166,30 +169,29 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
     # Per-core rates; derive mean and max.
     cpu_pct: float | None = None
     cpu_max_pct: float | None = None
-    per_pcts: list[float] = []
-    for cid, total in per_cpu_total.items():
-        prev = state._prev_cpu.get(cid)
-        if prev is None:
-            continue
-        prev_idle, prev_total = prev
-        td = total - prev_total
-        if td > 0:
-            per_pcts.append(max(0, 100 * (1 - (per_cpu_idle.get(cid, 0) - prev_idle) / td)))
-    if per_pcts:
-        cpu_pct = sum(per_pcts) / len(per_pcts)
-        cpu_max_pct = max(per_pcts)
-    state._prev_cpu = {cid: (per_cpu_idle.get(cid, 0), t) for cid, t in per_cpu_total.items()}
 
     # Network rates.
     rx_bps: float | None = None
     tx_bps: float | None = None
-    if state._prev_net is not None:
-        prev_ts, prev_rx, prev_tx = state._prev_net
-        dt = ts - prev_ts
-        if dt > 0:
-            rx_bps = max(0.0, (rx_total - prev_rx) / dt)
-            tx_bps = max(0.0, (tx_total - prev_tx) / dt)
-    state._prev_net = (ts, rx_total, tx_total)
+
+    if (prev := state.metrics) is not None:
+        prev_cpu = prev.cpu_seconds
+        per_pcts: list[float] = []
+        for cid, total in per_cpu_total.items():
+            if (prev_info := prev_cpu.get(cid)) is not None:
+                prev_idle, prev_total = prev_info
+                if (td := total - prev_total) > 0:
+                    per_pcts.append(max(0, 100 * (1 - (per_cpu_idle.get(cid, 0) - prev_idle) / td)))
+
+        if per_pcts:
+            cpu_pct = sum(per_pcts) / len(per_pcts)
+            cpu_max_pct = max(per_pcts)
+
+        if (dt := ts - prev.timestamp) > 0:
+            rx_bps = max(0.0, (rx_total - prev.rx) / dt)
+            tx_bps = max(0.0, (tx_total - prev.tx) / dt)
+
+    cpu_seconds = {cid: (per_cpu_idle.get(cid, 0), t) for cid, t in per_cpu_total.items()}
 
     if (fs := fs_by_mount.get(fs_mount := '/')) is not None:
         fs_total, avail = fs
@@ -209,7 +211,7 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
             mem_total,
             swap_total - swap_free,
             swap_total,
-            list(fs_by_mount.keys()),
+            list(fs_by_mount),
             fs_used,
             fs_total,
         )
@@ -220,6 +222,7 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
         cpu_pct=cpu_pct,
         cpu_max_pct=cpu_max_pct,
         cpu_count=len(per_cpu_total),
+        cpu_seconds=cpu_seconds,
         mem_used=max(0, mem_total - mem_available),
         mem_total=mem_total,
         swap_used=max(0, swap_total - swap_free),
@@ -227,6 +230,8 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
         fs_used=fs_used,
         fs_total=fs_total,
         fs_mount=fs_mount,
+        rx=rx_total,
+        tx=tx_total,
         rx_bps=rx_bps,
         tx_bps=tx_bps,
         load1=metrics['node_load1'],

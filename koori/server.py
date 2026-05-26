@@ -28,10 +28,6 @@ class ServerState:
     update: Callable[[], Awaitable[MetricsSnapshot]] | None = None
     exclude: list[str] = field(default_factory=list)
 
-    # cpu_id -> (idle, total) seconds, for per-core rate computation
-    _prev_cpu: dict[str, tuple[float, float]] = field(default_factory=dict)
-    _prev_net: tuple[float, float, float] | None = None  # (ts, rx, tx)
-
     async def _update_metrics(self, conn: Session) -> MetricsSnapshot:
         self.metrics = metrics = parse_metrics(self, await conn.fetch_metrics(self.name))
         return metrics
