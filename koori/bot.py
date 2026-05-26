@@ -217,7 +217,12 @@ async def render_loop(
     try:
         await asyncio.wait_for(wait_servers(sema, states), timeout=ctrl.interval)
     except TimeoutError:
-        log.warning('timed out waiting for servers online')
+        log.warning(
+            'timed out waiting for servers up; offline: %r',
+            [s.name for s in states if s.update is None],
+        )
+    else:
+        log.info('all servers online')
     del sema
     alert = AlertState()
     scheduled = None

@@ -166,7 +166,7 @@ class Session(ABC):
         for attempt in range(2):
             try:
                 if self._conn is None:
-                    log.info('%s: connecting (attempt %d)', name, attempt)
+                    log.debug('%s: connecting (attempt %d)', name, attempt)
                     self._conn = HTTPConnection(await self._connect_stream())
 
                 data = await self._conn.request(REQUEST)
@@ -191,8 +191,8 @@ class Session(ABC):
 
     async def close_metrics(self, name: str) -> None:
         if self._conn is not None:
+            log.warning('%s: metrics disconnecting', name)
             await self._conn.close()
-            log.debug('%s: metrics connection closed', name)
             self._conn = None
 
 

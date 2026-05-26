@@ -42,10 +42,12 @@ class ServerState:
                     self.update = lambda: self._update_metrics(conn)
                     self.error = None
                     backoff = 1
-                    log.info('%s: connected', self.name)
                     if sema is not None:
                         sema.release()
                         sema = None
+                        log.debug('%s: connected', self.name)
+                    else:
+                        log.info('%s: reconnected', self.name)
 
                     async for line in conn.journal_lines():
                         if (line := line.strip()) and not any(kw in line for kw in self.exclude):
