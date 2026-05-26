@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 TG_MESSAGE_LIMIT = MessageLimit.MAX_TEXT_LENGTH
 LINE_TRIM = 180
-BAR_WIDTH = 12
+BAR_WIDTH = 10
 PARTIALS = '▏▎▍▌▋▊▉'
 METRICS_FETCH_TIMEOUT = 10
 
@@ -42,12 +42,12 @@ def _fmt_size(x: float) -> str:
 
 def _fmt_bps(x: float | None) -> str:
     if x is None:
-        return '   —  '
-    for unit in ('B/s', 'K/s', 'M/s', 'G/s'):
+        return '  —  '
+    for unit in ('B/s', 'K/s', 'M/s', 'G/s', 'T/s'):
         if x < 1024:
-            return f'{x:6.1f}{unit}'
+            return f'{x:5.1f}{unit}'
         x /= 1024
-    return f'{x:6.1f}T/s'
+    return f'{x:5.1f}P/s'
 
 
 def _fmt_duration(t: float) -> str:
@@ -157,7 +157,9 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
         rows.append(_gauge('SWP', pct_swap, m.swap_used, m.swap_total))
     if m.fs_mount is not None:
         rows.append(_gauge(m.fs_mount, pct_fs, m.fs_used, m.fs_total))
-    rows.append(f'NET  ↓{_fmt_bps(m.rx_bps)}   ↑{_fmt_bps(m.tx_bps)}')
+    rows.append(
+        f'NET ↓{_fmt_bps(m.rx_bps)} ({_fmt_size(m.rx)}) ↑{_fmt_bps(m.tx_bps)} ({_fmt_size(m.tx)})'
+    )
 
     days, rem = divmod(int(m.timestamp - m.boot_time), 86400)
     hours, rem = divmod(rem, 3600)
