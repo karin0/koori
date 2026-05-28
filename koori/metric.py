@@ -27,12 +27,11 @@ COLLECTORS = (
 )
 
 ALERT_RULES = (
-    ('node_vmstat_oom_kill', 1, 'OOM'),
-    ('node_kernel_hung_tasks_total', 1, 'Hung'),
-    ('node_netstat_TcpExt_ListenOverflows', 1, 'ListenOvfl'),
-    ('node_cpu_package_throttles_total', 1, 'Throttle'),
-    ('node_softnet_dropped_total', 1, 'NetDrop'),
-    ('node_procs_blocked', 10, 'Blocked'),
+    ('node_vmstat_oom_kill', 'OOM'),
+    ('node_kernel_hung_tasks_total', 'Hung'),
+    ('node_netstat_TcpExt_ListenOverflows', 'ListenOvfl'),
+    ('node_cpu_package_throttles_total', 'Throttle'),
+    ('node_softnet_dropped_total', 'NetDrop'),
 )
 
 METRICS_KEYS = (
@@ -47,7 +46,8 @@ METRICS_KEYS = (
     'node_nf_conntrack_entries',
     'node_nf_conntrack_entries_limit',
     'node_memory_HardwareCorrupted_bytes',
-    *tuple(k for k, _, _ in ALERT_RULES),
+    'node_procs_blocked',
+    *tuple(k for k, _ in ALERT_RULES),
 )
 
 EXT_KEYS = (
@@ -84,6 +84,7 @@ class MetricsSnapshot(NamedTuple):
     load1: float
     boot_time: float
     alerts: list[str]
+    counters: dict[str, int]
 
 
 def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
@@ -154,9 +155,8 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
         ts = time.time()
         log.warning('%s: missing node_time_seconds metric', state.name)
 
-    for mname, threshold, name in ALERT_RULES:
-        if (val := int(metrics[mname])) >= threshold:
-            alerts.append(f'{name}: {val}')
+    if (blocked := int(metrics['node_procs_blocked'])) >= 10:
+        alerts.append(f'Blocked: {blocked}')
 
     if (ct_limit := int(metrics['node_nf_conntrack_entries_limit'])) and (
         ct_entries := int(metrics['node_nf_conntrack_entries'])
@@ -174,7 +174,15 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
     rx_bps: float | None = None
     tx_bps: float | None = None
 
-    if (prev := state.metrics) is not None:
+    if (prev := state.metrics) is None:
+        counters = {name: int(metrics[name]) for name, _ in ALERT_RULES}
+    else:
+        counters = {}
+        for name, label in ALERT_RULES:
+            counters[name] = val = int(metrics[name])
+            if val and (delta := val - prev.counters[name]):
+                alerts.append(f'{label}: {val} ({delta:+})')
+
         prev_cpu = prev.cpu_seconds
         per_pcts: list[float] = []
         for cid, total in per_cpu_total.items():
@@ -239,4 +247,5 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
         temp=temp_max,
         temp_chip=temp_chip,
         alerts=alerts,
+        counters=counters,
     )
