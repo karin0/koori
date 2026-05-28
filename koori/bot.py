@@ -132,9 +132,18 @@ async def _check_alerts(
 ) -> None:
     lines: list[str] = []
     keys: set[str] = set()
+    now: float | None = None
+
+    def push_time(ts: float | None = None) -> None:
+        nonlocal now
+        if ts is None:
+            if now is None:
+                now = time.time()
+            ts = now
+        date = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+        lines.append(f'⏱️ <tg-time unix="{int(ts)}" format="wdT">{date}</tg-time>')
 
     for s in servers:
-        old_lines = len(lines)
 
         def recover(msg: str, symbol: str = '✅') -> None:
             lines.append(f'{symbol} <b>{html.escape(s.name)}</b>: {html.escape(msg)}')  # noqa: B023
@@ -146,12 +155,16 @@ async def _check_alerts(
         down_key = f'{s.name}:down'
         if s.update is None:
             alert(down_key, f'down: {s.error or '<unknown error>'}')
+            push_time()
         elif down_key in state.keys:
             recover('back online')
+            push_time()
 
         m = s.metrics
         if m is None:
             continue
+
+        old_lines = len(lines)
 
         mem_key = f'{s.name}:mem'
         mem_avail = m.mem_total - m.mem_used
@@ -181,8 +194,7 @@ async def _check_alerts(
             recover('alerts cleared')
 
         if len(lines) != old_lines:
-            date = datetime.fromtimestamp(m.timestamp).strftime('%Y-%m-%d %H:%M:%S')
-            lines.append(f'⏱️ <tg-time unix="{int(m.timestamp)}" format="wdT">{date}</tg-time>')
+            push_time(m.timestamp)
 
     current = frozenset(keys)
     now = time.monotonic()
