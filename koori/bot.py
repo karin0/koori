@@ -230,13 +230,17 @@ async def render_loop(
     try:
         await asyncio.wait_for(wait_servers(sema, states), timeout=ctrl.interval)
     except TimeoutError:
-        log.warning(
-            'timed out waiting for servers up; offline: %r',
-            [s.name for s in states if s.update is None],
+        info = (
+            'timed out waiting for servers up; offline: '
+            f'{', '.join(s.name for s in states if s.update is None)}'
         )
+        log.warning('%s', info)
     else:
-        log.info('all servers online')
-    del sema
+        info = f'all servers up: {', '.join(s.name for s in states)}'
+        log.info('%s', info)
+
+    await bot.send_message(chat_id=alert_chat_id, text=info, disable_web_page_preview=True)
+    del sema, info
     alert = AlertState()
     scheduled = None
 
