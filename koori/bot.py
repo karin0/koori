@@ -220,6 +220,7 @@ async def _check_alerts(
 async def render_loop(
     bot: Bot,
     chat_id: int,
+    alert_chat_id: int,
     states: Sequence[ServerState],
     journal: deque[JournalEntry],
     ctrl: PanelControl,
@@ -241,7 +242,7 @@ async def render_loop(
 
     while True:
         text, _ = await asyncio.gather(
-            render_panel(states, journal, ctrl), _check_alerts(bot, chat_id, states, alert)
+            render_panel(states, journal, ctrl), _check_alerts(bot, alert_chat_id, states, alert)
         )
         try:
             await bot.edit_message_text(

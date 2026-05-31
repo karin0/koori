@@ -75,11 +75,14 @@ def run(config_path: Path, *, dry_run: bool) -> Coroutine[Any, Any, None]:
         return _dry_run(servers, journal, ctrl)
 
     chat_id = int(config['chat_id'])
+    alert_chat_id = int(config.get('alert_chat_id', chat_id))
     bot = build_bot()
     sema = asyncio.Semaphore(0)
     tasks = (
         *(asyncio.create_task(s.run(journal, sema), name=f'server:{s.name}') for s in servers),
-        asyncio.create_task(render_loop(bot, chat_id, servers, journal, ctrl, sema), name='render'),
+        asyncio.create_task(
+            render_loop(bot, chat_id, alert_chat_id, servers, journal, ctrl, sema), name='render'
+        ),
         asyncio.create_task(update_poller(bot, chat_id, ctrl), name='poller'),
     )
     return wait_tasks(bot, tasks)
