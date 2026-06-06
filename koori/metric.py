@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, NamedTuple
 from prometheus_client.parser import text_string_to_metric_families
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from .server import ServerState
 
 log = logging.getLogger(__name__)
@@ -83,7 +85,8 @@ class MetricsSnapshot(NamedTuple):
     temp_chip: str | None
     load1: float
     boot_time: float
-    alerts: list[str]
+    alerts: Sequence[str]
+    cnt_alerts: Sequence[str]
     counters: dict[str, int]
 
 
@@ -95,6 +98,7 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
     fs_by_mount: dict[str, list[int]] = {}
 
     alerts: list[str] = []
+    cnt_alerts: list[str] = []
     temp_max: float | None = None
     temp_chip: str | None = None
 
@@ -181,7 +185,7 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
         for name, label in ALERT_RULES:
             counters[name] = val = int(metrics[name])
             if val and (delta := val - prev.counters[name]):
-                alerts.append(f'{label}: {val} ({delta:+})')
+                cnt_alerts.append(f'{label}: {val} ({delta:+})')
 
         prev_cpu = prev.cpu_seconds
         per_pcts: list[float] = []
@@ -247,5 +251,6 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
         temp=temp_max,
         temp_chip=temp_chip,
         alerts=alerts,
+        cnt_alerts=cnt_alerts,
         counters=counters,
     )

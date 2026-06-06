@@ -50,20 +50,24 @@ class AlertState:
             server_lines.append(f'⏱️ <tg-time unix="{int(ts)}" format="wdT">{date}</tg-time>')
             eff += len(date) + 2
 
-        def recover(msg: str, symbol: str = '✅', key_changed: bool = True) -> None:
+        def alert(msg: str, *, symbol: str = '⚠️', key: str | None = None) -> None:
             nonlocal eff, changed
-            changed |= key_changed
+            if key is None:
+                changed = True
+            else:
+                s_keys.add(key)
+                if not changed:
+                    changed = key not in self.keys
             server_lines.append(f'{symbol} <b>{html.escape(s.name)}</b>: {html.escape(msg)}')
             eff += len(s.name) + len(msg) + len(symbol) + 3
 
-        def alert(key: str, msg: str):
-            s_keys.add(key)
-            recover(msg, symbol='⚠️', key_changed=key not in self.keys)
+        def recover(msg: str) -> None:
+            alert(msg, symbol='✅')
 
         # Check down state
         down_key = f'{s.name}:down'
         if s.update is None:
-            alert(down_key, f'down: {s.error or '<unknown error>'}')
+            alert(f'down: {s.error or '<unknown error>'}', key=down_key)
             push_time()
         elif down_key in self.keys:
             recover('back online')
@@ -75,29 +79,32 @@ class AlertState:
             mem_key = f'{s.name}:mem'
             mem_avail = m.mem_total - m.mem_used
             if m.mem_total > 0 and mem_avail <= MEM_AVAIL_ALERT:
-                alert(mem_key, f'available memory low ({mem_avail >> 20} MiB)')
+                alert(f'available memory low ({mem_avail >> 20} MiB)', key=mem_key)
             elif mem_key in self.keys:
                 recover(f'available memory recovered ({mem_avail >> 20} MiB)')
 
             fs_key = f'{s.name}:fs'
             fs_avail = m.fs_total - m.fs_used
             if m.fs_total > 0 and fs_avail <= FS_AVAIL_ALERT:
-                alert(fs_key, f'available disk space low ({fs_avail / (1 << 30):.1f} GiB)')
+                alert(f'available disk space low ({fs_avail / (1 << 30):.1f} GiB)', key=fs_key)
             elif fs_key in self.keys:
                 recover(f'available disk space recovered ({fs_avail / (1 << 30):.1f} GiB)')
 
             if m.temp is not None:
                 temp_key = f'{s.name}:temp'
                 if m.temp >= TEMP_ALERT:
-                    alert(temp_key, f'{m.temp_chip or '<unknown sensor>'}: {m.temp:.1f}°C')
+                    alert(f'{m.temp_chip or '<unknown sensor>'}: {m.temp:.1f}°C', key=temp_key)
                 elif temp_key in self.keys:
                     recover(f'{m.temp_chip or '<unknown sensor>'}: {m.temp:.1f}°C')
 
             sys_key = f'{s.name}:sys'
             if m.alerts:
-                alert(sys_key, ' | '.join(m.alerts))
+                alert(' | '.join(m.alerts), key=sys_key)
             elif sys_key in self.keys:
                 recover('alerts cleared')
+
+            if m.cnt_alerts:
+                alert(' | '.join(m.cnt_alerts))
 
             if len(server_lines) != old_lines:
                 push_time(m.timestamp)
