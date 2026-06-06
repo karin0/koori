@@ -26,6 +26,7 @@ class ServerState:
     exclude: list[str] = field(default_factory=list)
     session: Session | None = None
     alert_at: float = 0
+    alert_keys: frozenset[str] = field(default_factory=frozenset)
 
     async def _update_metrics(self, session: Session) -> MetricsSnapshot:
         self.metrics = metrics = parse_metrics(self, await session.fetch_metrics(self.name))

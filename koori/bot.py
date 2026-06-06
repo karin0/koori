@@ -16,7 +16,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter, TelegramError
 
-from .alert import AlertState
+from .alert import check_alert
 from .panel import render_panel
 
 if TYPE_CHECKING:
@@ -140,12 +140,11 @@ async def render_loop(
 
     await bot.send_message(chat_id=alert_chat_id, text=info, disable_web_page_preview=True)
     del sema, info
-    alert = AlertState()
     scheduled = None
 
     while True:
         text, _ = await asyncio.gather(
-            render_panel(states, journal, ctrl), alert.check(bot, alert_chat_id, states, journal)
+            render_panel(states, journal, ctrl), check_alert(bot, alert_chat_id, states, journal)
         )
         try:
             await bot.edit_message_text(
