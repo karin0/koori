@@ -183,7 +183,7 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
 
 
 def _fit_journal(
-    journal: deque[JournalEntry], budget: int, *, expanded: bool
+    journal: Sequence[JournalEntry], budget: int, *, expanded: bool
 ) -> tuple[str, int, int] | None:
     '''Fit as many entries as possible into budget eff-chars, newest-first.
 
@@ -196,8 +196,8 @@ def _fit_journal(
 
     rows = []
     eff = 0
-    for line in reversed(journal):
-        new_eff = eff + len(s := _trim(line)) + bool(rows)
+    for entry in reversed(journal):
+        new_eff = eff + len(s := _trim(entry.message)) + bool(rows)
         if new_eff > budget:
             break
         eff = new_eff

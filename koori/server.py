@@ -2,7 +2,7 @@ import asyncio
 import logging
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from .metric import MetricsSnapshot, parse_metrics
 
@@ -16,8 +16,6 @@ log = logging.getLogger(__name__)
 
 RECONNECT_BACKOFF_MAX = 60
 
-type JournalEntry = str
-
 
 @dataclass(slots=True, eq=False, match_args=False)
 class ServerState:
@@ -25,12 +23,18 @@ class ServerState:
     dialer: Dialer
     error: str | None = None
     metrics: MetricsSnapshot | None = None
-    update: Callable[[], Awaitable[MetricsSnapshot]] | None = None
     exclude: list[str] = field(default_factory=list)
+    session: Session | None = None
+    alert_at: float = 0
 
-    async def _update_metrics(self, conn: Session) -> MetricsSnapshot:
-        self.metrics = metrics = parse_metrics(self, await conn.fetch_metrics(self.name))
+    async def _update_metrics(self, session: Session) -> MetricsSnapshot:
+        self.metrics = metrics = parse_metrics(self, await session.fetch_metrics(self.name))
         return metrics
+
+    @property
+    def update(self) -> Callable[[], Awaitable[MetricsSnapshot]] | None:
+        if (session := self.session) is not None:
+            return lambda: self._update_metrics(session)
 
     async def run(
         self, journal: deque[JournalEntry], sema: asyncio.Semaphore | None = None
@@ -38,8 +42,8 @@ class ServerState:
         backoff = 1
         while True:
             try:
-                async with self.dialer.open(self.name) as conn:
-                    self.update = lambda: self._update_metrics(conn)
+                async with self.dialer.open(self.name) as session:
+                    self.session = session
                     self.error = None
                     backoff = 1
                     if sema is not None:
@@ -49,21 +53,26 @@ class ServerState:
                     else:
                         log.info('%s: reconnected', self.name)
 
-                    async for line in conn.journal_lines():
+                    async for line in session.journal_lines():
                         if (line := line.strip()) and not any(kw in line for kw in self.exclude):
-                            journal.append(line)
+                            journal.append(JournalEntry(self, line))
 
             except asyncio.CancelledError:
-                self.update = None
+                self.session = None
                 self.error = 'cancelled'
                 raise
             except Exception as e:
-                self.update = None
+                self.session = None
                 self.error = f'{type(e).__name__}: {e}'
                 log.exception('%s: %s', self.name, self.error)
             else:
-                self.update = None
+                self.session = None
                 self.error = 'journal stream ended'
                 log.warning('%s: %s', self.name, self.error)
             await asyncio.sleep(backoff)
             backoff = min(backoff << 1, RECONNECT_BACKOFF_MAX)
+
+
+class JournalEntry(NamedTuple):
+    server: ServerState
+    message: str

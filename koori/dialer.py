@@ -161,6 +161,9 @@ class Session(ABC):
     @abstractmethod
     def _connect_stream(self) -> Awaitable[tuple[StreamReader, StreamWriter]]: ...
 
+    @abstractmethod
+    async def run_command(self, cmd: str) -> str: ...
+
     async def fetch_metrics(self, name: str) -> str:
         # Self-healing retry loop: retry once on a fresh connection if the persistent one was closed
         for attempt in range(2):
@@ -217,6 +220,15 @@ class LocalSession(Session):
     def _connect_stream(self) -> Awaitable[StreamPair]:
         return asyncio.open_connection('127.0.0.1', METRICS_PORT)
 
+    async def run_command(self, cmd: str) -> str:
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        return (stdout or stderr).decode('utf-8', errors='replace')
+
 
 class LocalDialer(Dialer):
     __slots__ = ()
@@ -256,6 +268,15 @@ class SSHSession(Session):
 
     def _connect_stream(self) -> Awaitable[StreamPair]:
         return self._ssh.open_connection('127.0.0.1', METRICS_PORT, encoding=None)
+
+    async def run_command(self, cmd: str) -> str:
+        res = await self._ssh.run(cmd, timeout=10)
+        out = res.stdout or res.stderr
+        if not out:
+            return ''
+        if isinstance(out, bytes):
+            return out.decode('utf-8', errors='replace')
+        return out
 
 
 class SSHDialer(Dialer):

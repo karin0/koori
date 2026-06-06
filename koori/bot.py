@@ -145,7 +145,7 @@ async def render_loop(
 
     while True:
         text, _ = await asyncio.gather(
-            render_panel(states, journal, ctrl), alert.check(bot, alert_chat_id, states)
+            render_panel(states, journal, ctrl), alert.check(bot, alert_chat_id, states, journal)
         )
         try:
             await bot.edit_message_text(
