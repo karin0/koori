@@ -34,7 +34,7 @@ def _build_server(spec: dict[str, Any]) -> ServerState:
         case other:
             raise ValueError(f'unknown dialer kind: {other!r}')
 
-    return ServerState(name, dialer, exclude=list(spec.get('exclude') or []))
+    return ServerState(name, dialer, exclude=tuple(spec.get('exclude', ())))
 
 
 async def _dry_run(

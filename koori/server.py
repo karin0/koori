@@ -22,7 +22,7 @@ class ServerState:
     dialer: Dialer
     error: str | None = None
     metrics: MetricsSnapshot | None = None
-    exclude: list[str] = field(default_factory=list)
+    exclude: tuple[str, ...] = ()
     session: Session | None = None
     alert_at: float = 0
     alert_keys: frozenset[str] = field(default_factory=frozenset)
