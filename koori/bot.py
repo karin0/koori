@@ -92,7 +92,9 @@ def build_bot() -> Bot:
     )
 
 
-async def ensure_panel_message(bot: Bot, chat_id: int, ctrl: PanelControl) -> int:
+async def ensure_panel_message(
+    bot: Bot, chat_id: int, ctrl: PanelControl, *, text: str | None = None
+) -> int:
     key = str(chat_id)
     try:
         with STATE_FILE.open(encoding='utf-8') as fp:
@@ -100,19 +102,17 @@ async def ensure_panel_message(bot: Bot, chat_id: int, ctrl: PanelControl) -> in
     except FileNotFoundError:
         state = {}
     else:
-        if (val := state.get(key)) is not None:
+        if text is None and (val := state.get(key)) is not None:
             return val
 
     msg = await bot.send_message(
         chat_id=chat_id,
-        text='starting…',
+        text=text or 'starting…',
         reply_markup=_keyboard(ctrl),
         disable_web_page_preview=True,
     )
     try:
-        await bot.pin_chat_message(
-            chat_id=chat_id, message_id=msg.message_id, disable_notification=True
-        )
+        await msg.pin()
     except TelegramError as e:
         log.warning('pin failed (continuing anyway): %s', e)
 
@@ -266,7 +266,8 @@ async def render_loop(
             continue
         except BadRequest as e:
             if 'not modified' not in str(e).lower():
-                log.warning('edit failed: %s', e)
+                log.error('edit failed: %s', e)
+                msg_id = await ensure_panel_message(bot, chat_id, ctrl, text=text)
         except TelegramError:
             log.exception('edit failed')
 
