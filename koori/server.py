@@ -8,7 +8,6 @@ from .metric import MetricsSnapshot, parse_metrics
 
 if TYPE_CHECKING:
     from collections import deque
-    from collections.abc import Awaitable, Callable
 
     from .dialer import Dialer, Session
 
@@ -28,14 +27,9 @@ class ServerState:
     alert_at: float = 0
     alert_keys: frozenset[str] = field(default_factory=frozenset)
 
-    async def _update_metrics(self, session: Session) -> MetricsSnapshot:
+    async def refresh_metrics(self, session: Session) -> MetricsSnapshot:
         self.metrics = metrics = parse_metrics(self, await session.fetch_metrics(self.name))
         return metrics
-
-    @property
-    def update(self) -> Callable[[], Awaitable[MetricsSnapshot]] | None:
-        if (session := self.session) is not None:
-            return lambda: self._update_metrics(session)
 
     async def run(
         self, journal: deque[JournalEntry], sema: asyncio.Semaphore | None = None

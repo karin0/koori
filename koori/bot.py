@@ -131,7 +131,7 @@ async def render_loop(
     except TimeoutError:
         info = (
             'timed out waiting for servers up; offline: '
-            f'{', '.join(s.name for s in states if s.update is None)}'
+            f'{', '.join(s.name for s in states if s.session is None)}'
         )
         log.warning('%s', info)
     else:

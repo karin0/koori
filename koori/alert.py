@@ -66,7 +66,7 @@ async def _check_server(
         alert(msg, symbol='✅')
 
     # Check down state
-    if s.update is None:
+    if s.session is None:
         alert(f'down: {s.error or '<unknown error>'}', key='down')
         push_time()
     elif 'down' in keys:

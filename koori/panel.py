@@ -115,7 +115,7 @@ def _trim(line: str, n: int = LINE_TRIM) -> str:
 
 async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str]:
     name = f'<b>{html.escape(server.name)}</b>'
-    if (func := server.update) is None:
+    if (session := server.session) is None:
         header = '🔴 ' + name
         return (header, f'offline: {html.escape(server.error or '<unknown>')}')
 
@@ -124,7 +124,9 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
     else:
         t0 = time.monotonic()
         try:
-            m = await asyncio.wait_for(func(), timeout=METRICS_FETCH_TIMEOUT)
+            m = await asyncio.wait_for(
+                server.refresh_metrics(session), timeout=METRICS_FETCH_TIMEOUT
+            )
         except asyncio.CancelledError:
             raise
         except Exception as e:
