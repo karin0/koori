@@ -168,7 +168,7 @@ def parse_metrics(state: ServerState, text: str) -> MetricsSnapshot:
         alerts.append(f'Conntrack: {ct_entries}/{ct_limit}')
 
     if corrupt_val := metrics['node_memory_HardwareCorrupted_bytes']:
-        alerts.append(f'RAM Corrupted: {int(corrupt_val) >> 20} MiB')
+        alerts.append(f'RAM Corrupted: {corrupt_val}')
 
     # Per-core rates; derive mean and max.
     cpu_pct: float | None = None
