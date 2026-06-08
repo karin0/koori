@@ -109,33 +109,45 @@ async def _check_server(
     if not (changed or (new_keys and (now - s.alert_at >= ALERT_RESEND))):
         return
 
-    if s.session is not None:
-        try:
-            proc_info = await s.session.run_command('ps -eo pcpu,pmem,args --sort=-pcpu')
-        except (OSError, TimeoutError, asyncssh.Error) as e:
-            log.warning('%s: failed to fetch busiest processes: %s', s.name, e)
-        else:
-            lines_proc = proc_info.splitlines()[:10]
-            proc_info = '\n'.join(lines_proc)
-            eff += len(proc_info)
-            if proc_info:
-                server_lines.append(
-                    f'<blockquote expandable><pre>{html.escape(proc_info)}</pre></blockquote>'
-                )
+    if eff < TG_MESSAGE_LIMIT:
+        if s.session is not None:
+            try:
+                proc_info = await s.session.run_command('ps -eo pcpu,pmem,args --sort=-pcpu')
+            except (OSError, TimeoutError, asyncssh.Error) as e:
+                log.warning('%s: failed to fetch busiest processes: %s', s.name, e)
+            else:
+                lines = []
+                for line in proc_info.splitlines()[:10]:
+                    if (new_eff := eff + len(line := line.rstrip()) + 1) <= TG_MESSAGE_LIMIT:
+                        lines.append(line)
+                        eff = new_eff
+                    else:
+                        break
+                if lines:
+                    inner = '\n'.join(f'<code>{html.escape(line)}</code>' for line in lines)
+                    server_lines.append(f'<blockquote expandable>{inner}</blockquote>')
 
-    if (
-        (server_logs := tuple(entry for entry in journal if entry.server is s))
-        and (budget := TG_MESSAGE_LIMIT - eff) > 0
-        and (fit := _fit_journal(server_logs, budget, expanded=False)) is not None
-    ):
-        server_lines.append(fit[0])
+        if (server_logs := tuple(entry for entry in journal if entry.server is s)) and (
+            fit := _fit_journal(server_logs, TG_MESSAGE_LIMIT - eff, expanded=False)
+        ) is not None:
+            server_lines.append(fit[0])
 
-    text = '\n'.join(server_lines)
+        text = '\n'.join(server_lines)
+        parse_mode = ParseMode.HTML
+    elif eff == TG_MESSAGE_LIMIT:
+        text = '\n'.join(server_lines)
+        parse_mode = ParseMode.HTML
+    else:
+        # Unlikely, but just in case.
+        log.error('%s: alert message too long (%d > %d)', s.name, eff, TG_MESSAGE_LIMIT)
+        text = '\n'.join(server_lines)[: TG_MESSAGE_LIMIT - 1] + '…'
+        parse_mode = None
+
     try:
         await bot.send_message(
             chat_id=chat_id,
             text=text,
-            parse_mode=ParseMode.HTML,
+            parse_mode=parse_mode,
             disable_web_page_preview=True,
         )
     except TelegramError:
