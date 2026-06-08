@@ -11,7 +11,7 @@ from telegram.constants import MessageLimit
 
 if TYPE_CHECKING:
     from collections import deque
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from .bot import PanelControl
     from .server import JournalEntry, ServerState
@@ -110,6 +110,7 @@ def _cpu_row(avg: float | None, peak: float | None, count: int) -> str:
 
 
 def _trim(line: str, n: int = LINE_TRIM) -> str:
+    line = line.rstrip()
     return line if len(line) <= n else line[: n - 1] + '…'
 
 
@@ -184,31 +185,23 @@ async def _render_server(server: ServerState, skip_update: bool) -> Sequence[str
     return (header, f'<pre>{html.escape('\n'.join(rows))}</pre>')
 
 
-def _fit_journal(
-    journal: Sequence[JournalEntry], budget: int, *, expanded: bool
-) -> tuple[str, int, int] | None:
-    '''Fit as many entries as possible into budget eff-chars, newest-first.
+def fit_stream(stream: Iterable[str], eff: int) -> tuple[Sequence[str], int]:
+    if eff >= (limit := TG_MESSAGE_LIMIT):
+        return (), 0
 
-    Default mode wraps in <blockquote expandable>…</blockquote> — visually collapsed by Telegram.
-    Contents stay newest-first. Expanded mode reverses to chronological asc inside a plain
-    <pre>, journalctl-style.
-    '''
-    if budget <= 0:
-        return None
-
-    rows = []
-    eff = 0
-    for entry in reversed(journal):
-        new_eff = eff + len(s := _trim(entry.message)) + bool(rows)
-        if new_eff > budget:
+    lines = []
+    for line in stream:
+        if (new_eff := eff + len(s := _trim(line)) + bool(lines)) > limit:
             break
         eff = new_eff
-        rows.append(s)
+        lines.append(s)
 
-    if rows:
-        if expanded:
-            return f'<pre>{html.escape('\n'.join(reversed(rows)))}</pre>', eff, len(rows)
-        return f'<blockquote expandable>{html.escape('\n'.join(rows))}</blockquote>', eff, len(rows)
+    return lines, eff
+
+
+def quote_lines(lines: Iterable[str]) -> str:
+    inner = '\n'.join(f'<code>{html.escape(line)}</code>' for line in lines)
+    return f'<blockquote expandable>{inner}</blockquote>'
 
 
 async def render_panel(
@@ -226,19 +219,18 @@ async def render_panel(
     if eff > TG_MESSAGE_LIMIT:
         return f'<i>panel too large to render ({eff} chars)</i>'
 
-    # -1 for the '\n' separator between server section and journal section.
-    journal_section = _fit_journal(journal, TG_MESSAGE_LIMIT - eff - 1, expanded=ctrl.expanded)
-    if journal_section is not None:
-        journal_text, journal_eff, journal_cnt = journal_section
-        eff += journal_eff + 1
-        text += '\n' + journal_text
+    journal_rows, eff = fit_stream((entry.message.strip() for entry in reversed(journal)), eff)
+    if journal_rows:
+        if ctrl.expanded:
+            text = f'{text}<pre>{html.escape('\n'.join(reversed(journal_rows)))}</pre>'
+        else:
+            text += quote_lines(journal_rows)
         log.debug(
-            'render_panel: journal=%d/%d, len=%d, eff=%d (%d)',
-            journal_cnt,
+            'render_panel: journal=%d/%d, len=%d, eff=%d',
+            len(journal_rows),
             len(journal),
             len(text),
             eff,
-            journal_eff,
         )
     else:
         log.debug('render_panel: journal=%d, len=%d, eff=%d', len(journal), len(text), eff)

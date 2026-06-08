@@ -11,7 +11,7 @@ import asyncssh
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
-from .panel import TG_MESSAGE_LIMIT, _fit_journal
+from .panel import TG_MESSAGE_LIMIT, fit_stream, quote_lines
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Sequence
@@ -38,6 +38,7 @@ async def _check_server(
     now_ts: float,
 ):
     keys = s.alert_keys
+    session = s.session
     new_keys: set[str] = set()
     server_lines: list[str] = []
     eff = 0
@@ -66,7 +67,7 @@ async def _check_server(
         alert(msg, symbol='✅')
 
     # Check down state
-    if s.session is None:
+    if session is None:
         alert(f'down: {s.error or '<unknown error>'}', key='down')
         push_time()
     elif 'down' in keys:
@@ -110,45 +111,33 @@ async def _check_server(
         return
 
     if eff < TG_MESSAGE_LIMIT:
-        if s.session is not None:
+        if session is not None:
             try:
-                proc_info = await s.session.run_command('ps -eo pcpu,pmem,args --sort=-pcpu')
+                proc_info = await session.run_command('ps -eo pcpu,pmem,args --sort=-pcpu')
             except (OSError, TimeoutError, asyncssh.Error) as e:
                 log.warning('%s: failed to fetch busiest processes: %s', s.name, e)
             else:
-                lines = []
-                for line in proc_info.splitlines()[:10]:
-                    if (new_eff := eff + len(line := line.rstrip()) + 1) <= TG_MESSAGE_LIMIT:
-                        lines.append(line)
-                        eff = new_eff
-                    else:
-                        break
-                if lines:
-                    inner = '\n'.join(f'<code>{html.escape(line)}</code>' for line in lines)
-                    server_lines.append(f'<blockquote expandable>{inner}</blockquote>')
+                ps_lines, eff = fit_stream(proc_info.splitlines()[:10], eff)
+                if ps_lines:
+                    server_lines.append(quote_lines(ps_lines))
 
-        if (server_logs := tuple(entry for entry in journal if entry.server is s)) and (
-            fit := _fit_journal(server_logs, TG_MESSAGE_LIMIT - eff, expanded=False)
-        ) is not None:
-            server_lines.append(fit[0])
+        if journal_lines := fit_stream(
+            (entry.message.strip() for entry in reversed(journal) if entry.server is s), eff
+        )[0]:
+            server_lines.append(quote_lines(journal_lines))
 
-        text = '\n'.join(server_lines)
-        parse_mode = ParseMode.HTML
-    elif eff == TG_MESSAGE_LIMIT:
-        text = '\n'.join(server_lines)
-        parse_mode = ParseMode.HTML
-    else:
+    text = '\n'.join(server_lines)
+    if eff > TG_MESSAGE_LIMIT:
         # Unlikely, but just in case.
         log.error('%s: alert message too long (%d > %d)', s.name, eff, TG_MESSAGE_LIMIT)
-        text = '\n'.join(server_lines)[: TG_MESSAGE_LIMIT - 1] + '…'
+        text = text[: TG_MESSAGE_LIMIT - 1] + '…'
         parse_mode = None
+    else:
+        parse_mode = ParseMode.HTML
 
     try:
         await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode=parse_mode,
-            disable_web_page_preview=True,
+            chat_id=chat_id, text=text, parse_mode=parse_mode, disable_web_page_preview=True
         )
     except TelegramError:
         log.exception('alert send failed: %s', text)
