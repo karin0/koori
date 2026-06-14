@@ -1,0 +1,44 @@
+# Telegram chat that hosts the pinned live panel. Required (except for --dry-run).
+chat_id: 123456789
+
+# Optional: route alerts to a separate chat. Defaults to chat_id.
+alert_chat_id: 123456789
+
+# Optional: path to the SSH known_hosts file. Defaults to ~/.ssh/known_hosts.
+known_hosts: ~/.ssh/known_hosts
+
+# Optional: default SSH identity for servers that omit identity_file. When unset,
+# we rely on ssh -G resolution (if use_ssh_config is true) or the SSH agent
+# ($SSH_AUTH_SOCK).
+#identity_file: ~/.ssh/id_ed25519
+
+# Optional: resolve unset per-server SSH parameters by shelling out to
+# `ssh -G <name>`, letting the real OpenSSH client apply ~/.ssh/config
+# (including Match, Include, and token expansion). Off by default since it runs
+# the ssh binary; turn it on to avoid duplicating what ~/.ssh/config already
+# declares. Honors $SSH_CONFIG.
+resolve_with_ssh: true
+
+servers:
+  # A remote host reached over SSH. Each unset parameter resolves by priority:
+  # explicit YAML > `ssh -G` (only if resolve_with_ssh is set) > built-in default
+  # (host -> name, port -> 22, user -> $USER, identity -> top-level identity_file
+  # -> ssh -G IdentityFile). The SSH agent is always tried too.
+  #
+  # With resolve_with_ssh and a ~/.ssh/config entry for `web-1`, this suffices:
+  - name: web-1
+    exclude:
+      - "audit:"
+      - "CRON"
+
+  # ...or spell everything out explicitly (always wins over ssh -G):
+  - name: web-2
+    host: web-2.internal
+    port: 2222
+    user: monitor
+    identity_file: ~/.ssh/id_ed25519
+
+  # The machine koori itself runs on. Streams journalctl directly and scrapes
+  # node_exporter on 127.0.0.1:9100.
+  - name: local
+    kind: local
