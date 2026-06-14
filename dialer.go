@@ -28,6 +28,8 @@ const (
 	commandTimeout    = 10 * time.Second
 	sshLoginTimeout   = 15 * time.Second
 	keepaliveInterval = 30 * time.Second
+	keepaliveTimeout  = 10 * time.Second
+	keepaliveMaxMiss  = 3
 )
 
 // metricsURL is resolved once: the path/query never changes between scrapes.
@@ -265,7 +267,7 @@ func (d sshDialer) Open(ctx context.Context, name string) (Session, error) {
 		stdout:  stdout,
 		done:    make(chan struct{}),
 	}
-	go s.keepalive()
+	go s.keepalive(name)
 	return s, nil
 }
 
@@ -278,17 +280,42 @@ type sshSession struct {
 	done    chan struct{}
 }
 
-func (s *sshSession) keepalive() {
+// keepalive probes the peer like OpenSSH's ServerAliveInterval/CountMax. The SSH
+// read loop has no deadline (golang/go#19338), so a silently dead peer would
+// otherwise hang the journal reader until slow TCP timeouts fire.
+func (s *sshSession) keepalive(name string) {
 	t := time.NewTicker(keepaliveInterval)
 	defer t.Stop()
+	misses := 0
 	for {
 		select {
 		case <-s.done:
 			return
 		case <-t.C:
-			if _, _, err := s.client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-				s.client.Close() // dead link; unblocks the journal reader
+			// SendRequest blocks until a reply or transport error, so bound it in
+			// its own goroutine. errc is buffered so a late reply, or the error
+			// from a concurrent Close, is always delivered and the goroutine exits.
+			errc := make(chan error, 1)
+			go func() {
+				_, _, err := s.client.SendRequest("keepalive@openssh.com", true, nil)
+				errc <- err
+			}()
+			select {
+			case <-s.done:
 				return
+			case err := <-errc:
+				if err != nil {
+					slog.Error("keepalive failed, closing connection", "server", name, "err", err)
+					s.client.Close()
+					return
+				}
+				misses = 0
+			case <-time.After(keepaliveTimeout):
+				if misses++; misses >= keepaliveMaxMiss {
+					slog.Error("keepalive timeout, closing connection", "server", name, "misses", misses)
+					s.client.Close()
+					return
+				}
 			}
 		}
 	}
