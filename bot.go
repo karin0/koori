@@ -10,7 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -30,65 +30,54 @@ func ptr[T any](v T) *T { return &v }
 
 var disabledPreview = &models.LinkPreviewOptions{IsDisabled: ptr(true)}
 
-// PanelControl is the shared, concurrency-safe control surface mutated by
-// inline-button callbacks and read by the render loop.
+// PanelControl is the shared control surface mutated by inline-button
+// callbacks and read by the render loop.
 type PanelControl struct {
-	mu         sync.Mutex
-	interval   time.Duration
-	expanded   bool
-	skipUpdate bool
+	interval   atomic.Int64
+	expanded   atomic.Bool
+	skipUpdate atomic.Bool
 	refresh    chan struct{}
 }
 
 func NewPanelControl() *PanelControl {
-	return &PanelControl{interval: defaultInterval, refresh: make(chan struct{}, 1)}
+	c := &PanelControl{
+		refresh: make(chan struct{}, 1),
+	}
+	c.interval.Store(int64(defaultInterval))
+	return c
 }
 
 func (c *PanelControl) Interval() time.Duration {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.interval
+	return time.Duration(c.interval.Load())
 }
 
 func (c *PanelControl) Expanded() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.expanded
+	return c.expanded.Load()
 }
 
 // takeSkipUpdate reports and clears the skip flag; the render path consumes it
 // so a single button press skips exactly one metrics fetch.
 func (c *PanelControl) takeSkipUpdate() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	v := c.skipUpdate
-	c.skipUpdate = false
-	return v
+	return c.skipUpdate.Swap(false)
 }
 
 func (c *PanelControl) peekSkipUpdate() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.skipUpdate
+	return c.skipUpdate.Load()
 }
 
+// slower, faster and toggleLog are only called from the serialized onUpdate
+// handler.
 func (c *PanelControl) slower() {
-	c.mu.Lock()
-	c.interval = min(maxInterval, c.interval*2)
-	c.mu.Unlock()
+	c.interval.Store(int64(min(maxInterval, c.Interval()*2)))
 }
 
 func (c *PanelControl) faster() {
-	c.mu.Lock()
-	c.interval = max(minInterval, c.interval/2)
-	c.mu.Unlock()
+	c.interval.Store(int64(max(minInterval, c.Interval()/2)))
 }
 
 func (c *PanelControl) toggleLog() {
-	c.mu.Lock()
-	c.expanded = !c.expanded
-	c.skipUpdate = true
-	c.mu.Unlock()
+	c.expanded.Store(!c.expanded.Load())
+	c.skipUpdate.Store(true)
 }
 
 func (c *PanelControl) signalRefresh() {
@@ -130,6 +119,9 @@ func buildBot(a *app) (*bot.Bot, error) {
 		bot.WithDefaultHandler(a.onUpdate),
 		bot.WithAllowedUpdates(bot.AllowedUpdates{"callback_query"}),
 		bot.WithHTTPClient(pollTimeout, &http.Client{Timeout: httpTimeout + pollTimeout}),
+		// Handlers run serially, so onUpdate never races itself: the control
+		// fields need only atomic load/store, not compare-and-swap.
+		bot.WithNotAsyncHandlers(),
 	}
 	if local := os.Getenv("LOCAL_SERVER"); local != "" {
 		opts = append(opts, bot.WithServerURL(strings.TrimRight(local, "/")))
