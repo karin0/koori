@@ -392,7 +392,7 @@ func parseSample(line string) (sample, bool) {
 		return s, false
 	}
 	v, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 		return s, false
 	}
 	s.value = v

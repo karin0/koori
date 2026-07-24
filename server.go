@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 )
@@ -17,12 +18,13 @@ type ServerState struct {
 	Name   string
 	dialer Dialer
 
-	mu        sync.Mutex
-	session   Session
-	err       string
-	metrics   *MetricsSnapshot
-	alertAt   time.Time
-	alertKeys map[string]bool
+	mu         sync.Mutex
+	session    Session
+	err        string
+	metrics    *MetricsSnapshot
+	pendingCnt []string // counter alerts queued until successfully delivered
+	alertAt    time.Time
+	alertKeys  map[string]bool
 }
 
 func NewServerState(name string, dialer Dialer) *ServerState {
@@ -56,8 +58,23 @@ func (s *ServerState) refreshMetrics(ctx context.Context, sess Session) (*Metric
 
 	s.mu.Lock()
 	s.metrics = m
+	s.pendingCnt = append(s.pendingCnt, m.CntAlerts...)
 	s.mu.Unlock()
 	return m, nil
+}
+
+// pendingAlerts returns the queued counter alerts without consuming them;
+// dropPendingAlerts removes the first n once they have been delivered.
+func (s *ServerState) pendingAlerts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.pendingCnt)
+}
+
+func (s *ServerState) dropPendingAlerts(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingCnt = s.pendingCnt[n:]
 }
 
 // Run maintains a persistent connection, streaming journal lines into the

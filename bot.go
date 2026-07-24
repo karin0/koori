@@ -204,6 +204,7 @@ func (a *app) ensurePanelMessage(ctx context.Context, text string) (int, error) 
 	msg, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:             a.chatID,
 		Text:               text,
+		ParseMode:          models.ParseModeHTML,
 		ReplyMarkup:        keyboard(a.ctrl),
 		LinkPreviewOptions: disabledPreview,
 	})

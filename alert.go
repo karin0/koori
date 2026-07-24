@@ -38,10 +38,20 @@ type alertBuilder struct {
 	changed  bool
 }
 
+// push appends a line whose effective (post-parse) length is eff, accounting
+// for the newline that joins it to the previous line.
+func (a *alertBuilder) push(line string, eff int) {
+	if len(a.lines) > 0 {
+		eff++
+	}
+	a.lines = append(a.lines, line)
+	a.eff += eff
+}
+
 func (a *alertBuilder) pushTime(t time.Time) {
 	date := t.Format("2006-01-02 15:04:05")
-	a.lines = append(a.lines, fmt.Sprintf(`⏱️ <tg-time unix="%d" format="wdT">%s</tg-time>`, t.Unix(), date))
-	a.eff += utf8.RuneCountInString(date) + 2
+	a.push(fmt.Sprintf(`⏱️ <tg-time unix="%d" format="wdT">%s</tg-time>`, t.Unix(), date),
+		utf8.RuneCountInString(date)+3)
 }
 
 // emit records a line. A non-empty key marks a recoverable condition: it stays
@@ -55,15 +65,24 @@ func (a *alertBuilder) emit(symbol, msg, key string) {
 			a.changed = !a.prevKeys[key]
 		}
 	}
-	a.lines = append(a.lines, fmt.Sprintf("%s <b>%s</b>: %s", symbol, html.EscapeString(a.server.Name), html.EscapeString(msg)))
-	a.eff += utf8.RuneCountInString(a.server.Name) + utf8.RuneCountInString(msg) + utf8.RuneCountInString(symbol) + 3
+	a.push(fmt.Sprintf("%s <b>%s</b>: %s", symbol, html.EscapeString(a.server.Name), html.EscapeString(msg)),
+		utf8.RuneCountInString(a.server.Name)+utf8.RuneCountInString(msg)+utf8.RuneCountInString(symbol)+3)
 }
 
 func (a *alertBuilder) alert(msg, key string) { a.emit(alertEmoji, msg, key) }
 func (a *alertBuilder) recover(msg string)    { a.emit(recoverEmoji, msg, "") }
 
+// hold carries a keyed condition forward without alerting or recovering when
+// the data needed to evaluate it is absent from the current snapshot.
+func (a *alertBuilder) hold(key string) {
+	if a.prevKeys[key] {
+		a.newKeys[key] = true
+	}
+}
+
 func checkServerAlert(ctx context.Context, b *bot.Bot, chatID int64, s *ServerState, journal *Journal, now time.Time) {
 	sess, errMsg, m := s.snapshot()
+	pending := s.pendingAlerts()
 
 	a := &alertBuilder{
 		server:   s,
@@ -82,24 +101,33 @@ func checkServerAlert(ctx context.Context, b *bot.Bot, chatID int64, s *ServerSt
 	if m != nil {
 		before := len(a.lines)
 
-		if memAvail := m.MemTotal - m.MemUsed; m.MemTotal > 0 && memAvail <= memAvailLow {
+		memAvail := m.MemTotal - m.MemUsed
+		switch {
+		case m.MemTotal == 0:
+			a.hold("mem")
+		case memAvail <= memAvailLow:
 			a.alert(fmt.Sprintf("available memory low (%d MiB)", memAvail>>20), "mem")
-		} else if a.prevKeys["mem"] {
+		case a.prevKeys["mem"]:
 			a.recover(fmt.Sprintf("available memory recovered (%d MiB)", memAvail>>20))
 		}
 
-		if fsAvail := m.FSTotal - m.FSUsed; m.FSTotal > 0 && fsAvail <= fsAvailLow {
+		fsAvail := m.FSTotal - m.FSUsed
+		switch {
+		case m.FSTotal == 0:
+			a.hold("fs")
+		case fsAvail <= fsAvailLow:
 			a.alert(fmt.Sprintf("available disk space low (%.1f GiB)", float64(fsAvail)/(1<<30)), "fs")
-		} else if a.prevKeys["fs"] {
+		case a.prevKeys["fs"]:
 			a.recover(fmt.Sprintf("available disk space recovered (%.1f GiB)", float64(fsAvail)/(1<<30)))
 		}
 
-		if !math.IsNaN(m.Temp) {
-			if m.Temp >= tempHighC {
-				a.alert(fmt.Sprintf("%s: %.1f°C", orDefault(m.TempChip, "<unknown sensor>"), m.Temp), "temp")
-			} else if a.prevKeys["temp"] {
-				a.recover(fmt.Sprintf("%s: %.1f°C", orDefault(m.TempChip, "<unknown sensor>"), m.Temp))
-			}
+		switch {
+		case math.IsNaN(m.Temp):
+			a.hold("temp")
+		case m.Temp >= tempHighC:
+			a.alert(fmt.Sprintf("%s: %.1f°C", orDefault(m.TempChip, "<unknown sensor>"), m.Temp), "temp")
+		case a.prevKeys["temp"]:
+			a.recover(fmt.Sprintf("%s: %.1f°C", orDefault(m.TempChip, "<unknown sensor>"), m.Temp))
 		}
 
 		if len(m.Alerts) > 0 {
@@ -108,8 +136,8 @@ func checkServerAlert(ctx context.Context, b *bot.Bot, chatID int64, s *ServerSt
 			a.recover("alerts cleared")
 		}
 
-		if len(m.CntAlerts) > 0 {
-			a.alert(strings.Join(m.CntAlerts, " | "), "")
+		if len(pending) > 0 {
+			a.alert(strings.Join(pending, " | "), "")
 		}
 
 		if len(a.lines) != before {
@@ -117,10 +145,9 @@ func checkServerAlert(ctx context.Context, b *bot.Bot, chatID int64, s *ServerSt
 		}
 	}
 
-	s.alertKeys = a.newKeys
-
+	// held keys can leave newKeys non-empty with nothing to say; never send then
 	resend := len(a.newKeys) > 0 && now.Sub(s.alertAt) >= alertResend
-	if !a.changed && !resend {
+	if len(a.lines) == 0 || (!a.changed && !resend) {
 		return
 	}
 
@@ -128,16 +155,14 @@ func checkServerAlert(ctx context.Context, b *bot.Bot, chatID int64, s *ServerSt
 		if sess != nil {
 			if out, err := sess.RunCommand(ctx, psCommand); err != nil {
 				slog.Warn("fetch busiest processes failed", "server", s.Name, "err", err)
-			} else {
-				psLines, eff := fitStream(headLines(out, maxPsLines), a.eff)
+			} else if psLines, eff := fitStream(headLines(out, maxPsLines), a.eff+1); len(psLines) > 0 {
+				a.lines = append(a.lines, quoteLines(psLines))
 				a.eff = eff
-				if len(psLines) > 0 {
-					a.lines = append(a.lines, quoteLines(psLines))
-				}
 			}
 		}
-		if jrnl, _ := fitStream(journal.messagesNewest(s), a.eff); len(jrnl) > 0 {
+		if jrnl, eff := fitStream(journal.messagesNewest(s), a.eff+1); len(jrnl) > 0 {
 			a.lines = append(a.lines, quoteLines(jrnl))
+			a.eff = eff
 		}
 	}
 
@@ -157,7 +182,10 @@ func checkServerAlert(ctx context.Context, b *bot.Bot, chatID int64, s *ServerSt
 	}); err != nil {
 		slog.Error("alert send failed", "server", s.Name, "err", err)
 	} else {
+		// Commit only after delivery so a failed send retries next cycle.
 		s.alertAt = now
+		s.alertKeys = a.newKeys
+		s.dropPendingAlerts(len(pending))
 	}
 }
 
