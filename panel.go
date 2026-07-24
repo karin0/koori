@@ -328,15 +328,18 @@ func renderPanel(ctx context.Context, servers []*ServerState, journal *Journal, 
 		return fmt.Sprintf("<i>panel too large to render (%d chars)</i>", eff)
 	}
 
-	all := journal.messagesNewest(nil)
+	expanded := ctrl.Expanded()
+	limit := 7
+	if expanded {
+		limit = math.MaxInt
+	}
+	all := journal.messagesNewest(nil, limit)
 	rows, eff := fitStream(all, eff)
 	if len(rows) > 0 {
-		if ctrl.Expanded() {
+		if expanded {
 			reverse(rows)
-			text += "<pre>" + html.EscapeString(strings.Join(rows, "\n")) + "</pre>"
-		} else {
-			text += quoteLines(rows)
 		}
+		text += "<pre>" + html.EscapeString(strings.Join(rows, "\n")) + "</pre>"
 	}
 	slog.Debug("render_panel", "journal", len(rows), "total", len(all), "len", len(text), "eff", eff)
 	return text

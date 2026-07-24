@@ -38,7 +38,7 @@ func (j *Journal) Append(e JournalEntry) {
 
 // messagesNewest returns trimmed messages newest first, optionally filtered to
 // a single server.
-func (j *Journal) messagesNewest(server *ServerState) []string {
+func (j *Journal) messagesNewest(server *ServerState, limit int) []string {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
@@ -51,6 +51,9 @@ func (j *Journal) messagesNewest(server *ServerState) []string {
 	for range j.size {
 		if e := j.buf[idx]; server == nil || e.Server == server {
 			out = append(out, e.Message)
+			if len(out) >= limit {
+				break
+			}
 		}
 		if idx--; idx < 0 {
 			idx = n - 1

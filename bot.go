@@ -201,12 +201,10 @@ func (a *app) ensurePanelMessage(ctx context.Context, text string) (int, error) 
 		text = "starting…"
 	}
 
-	msg, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:             a.chatID,
-		Text:               text,
-		ParseMode:          models.ParseModeHTML,
-		ReplyMarkup:        keyboard(a.ctrl),
-		LinkPreviewOptions: disabledPreview,
+	msg, err := a.bot.SendRichMessage(ctx, &bot.SendRichMessageParams{
+		ChatID:      a.chatID,
+		RichMessage: models.InputRichMessage{HTML: text},
+		ReplyMarkup: keyboard(a.ctrl),
 	})
 	if err != nil {
 		return 0, err
@@ -288,10 +286,11 @@ func (a *app) renderLoop(ctx context.Context, ready <-chan struct{}, cancel cont
 		checkAlerts(ctx, a.bot, a.alertChatID, a.servers, a.journal)
 
 		_, err := a.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID:             a.chatID,
-			MessageID:          msgID,
-			Text:               text,
-			ParseMode:          models.ParseModeHTML,
+			ChatID:    a.chatID,
+			MessageID: msgID,
+			RichMessage: &models.InputRichMessage{
+				HTML: text,
+			},
 			ReplyMarkup:        keyboard(a.ctrl),
 			LinkPreviewOptions: disabledPreview,
 		})

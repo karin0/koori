@@ -160,7 +160,7 @@ func checkServerAlert(ctx context.Context, b *bot.Bot, chatID int64, s *ServerSt
 				a.eff = eff
 			}
 		}
-		if jrnl, eff := fitStream(journal.messagesNewest(s), a.eff+1); len(jrnl) > 0 {
+		if jrnl, eff := fitStream(journal.messagesNewest(s, math.MaxInt), a.eff+1); len(jrnl) > 0 {
 			a.lines = append(a.lines, quoteLines(jrnl))
 			a.eff = eff
 		}
