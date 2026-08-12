@@ -24,7 +24,6 @@ node_hwmon_temp_celsius{chip="platform_x"} 40
 node_hwmon_temp_celsius{chip="platform_y"} 55
 node_load1 1.5
 node_boot_time_seconds 0
-node_procs_blocked 0
 node_scrape_collector_duration_seconds{collector="cpu"} 0.01
 node_scrape_collector_success{collector="cpu"} 1
 `

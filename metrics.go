@@ -13,7 +13,7 @@ import (
 // parameters, limiting the scrape to the families we actually parse.
 var collectors = []string{
 	"cpu", "meminfo", "netdev", "filesystem", "hwmon", "time", "loadavg",
-	"conntrack", "vmstat", "netstat", "stat", "kernel_hung", "softnet",
+	"conntrack", "vmstat", "stat", "kernel_hung", "softnet",
 }
 
 // alertRule maps a monotonically-increasing counter to a short alert label;
@@ -23,7 +23,6 @@ type alertRule struct{ metric, label string }
 var alertRules = []alertRule{
 	{"node_vmstat_oom_kill", "OOM"},
 	{"node_kernel_hung_tasks_total", "Hung"},
-	{"node_netstat_TcpExt_ListenOverflows", "ListenOvfl"},
 	{"node_cpu_package_throttles_total", "Throttle"},
 	{"node_softnet_dropped_total", "NetDrop"},
 }
@@ -43,7 +42,6 @@ var scalarKeys = func() map[string]struct{} {
 		"node_nf_conntrack_entries",
 		"node_nf_conntrack_entries_limit",
 		"node_memory_HardwareCorrupted_bytes",
-		"node_procs_blocked",
 	}
 	m := make(map[string]struct{}, len(keys)+len(alertRules))
 	for _, k := range keys {
@@ -84,10 +82,7 @@ type MetricsSnapshot struct {
 	Counters   map[string]int64
 }
 
-const (
-	blockedProcsAlert = 10
-	metricsPort       = 9100
-)
+const metricsPort = 9100
 
 var metricsAddr = fmt.Sprintf("127.0.0.1:%d", metricsPort)
 
@@ -187,9 +182,6 @@ func parseMetrics(name string, prev *MetricsSnapshot, text string) *MetricsSnaps
 	}
 
 	var alerts []string
-	if blocked := int64(scalars["node_procs_blocked"]); blocked >= blockedProcsAlert {
-		alerts = append(alerts, fmt.Sprintf("Blocked: %d", blocked))
-	}
 	if limit := int64(scalars["node_nf_conntrack_entries_limit"]); limit > 0 {
 		if entries := int64(scalars["node_nf_conntrack_entries"]); entries*5 >= limit*4 {
 			alerts = append(alerts, fmt.Sprintf("Conntrack: %d/%d", entries, limit))
