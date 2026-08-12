@@ -172,7 +172,12 @@ func renderServer(ctx context.Context, s *ServerState, skipUpdate bool) []string
 	name := "<b>" + html.EscapeString(s.Name) + "</b>"
 	sess, errMsg, m := s.snapshot()
 	if sess == nil {
-		return []string{"🔴 " + name, "offline: " + html.EscapeString(orDefault(errMsg, "<unknown>"))}
+		line := "offline: " + html.EscapeString(orDefault(errMsg, "<unknown>"))
+		if m != nil {
+			line += fmt.Sprintf(` (last seen <tg-time unix="%d" format="r">%s</tg-time>)`,
+				int64(m.Timestamp), hm(time.Unix(int64(m.Timestamp), 0)))
+		}
+		return []string{"🔴 " + name, line}
 	}
 
 	header := ""
@@ -198,7 +203,7 @@ func renderServer(ctx context.Context, s *ServerState, skipUpdate bool) []string
 
 	if header == "" {
 		date := hm(time.Unix(int64(m.Timestamp), 0))
-		header = fmt.Sprintf("🟢 %s  (%s%s, <tg-time unix=\"%d\" format=\"r\">%s</tg-time>)",
+		header = fmt.Sprintf(`🟢 %s  (%s%s, <tg-time unix="%d" format="r">%s</tg-time>)`,
 			name, dt, fmtDuration(m.ScrapeTime), int64(m.Timestamp), date)
 	}
 

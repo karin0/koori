@@ -20,6 +20,9 @@ const (
 	memAvailLow  = 200 << 20 // 200 MiB
 	fsAvailLow   = 2 << 30   // 2 GiB
 	tempHighC    = 80.0
+	tempCritC    = 90.0
+	tempLowC     = 75.0
+	tempSustain  = 30 * time.Second
 	psCommand    = "ps -eo pcpu,pmem,args --sort=-pcpu"
 	maxPsLines   = 10
 	recoverEmoji = "✅"
@@ -121,13 +124,45 @@ func checkServerAlert(ctx context.Context, b *bot.Bot, chatID int64, s *ServerSt
 			a.recover(fmt.Sprintf("available disk space recovered (%.1f GiB)", float64(fsAvail)/(1<<30)))
 		}
 
+		tempMsg := fmt.Sprintf("%s: %.1f°C", orDefault(m.TempChip, "<unknown sensor>"), m.Temp)
+
+		// Warn only after tempSustain of continuous heat above tempHighC, then
+		// recover through the tempLowC dead band.
 		switch {
 		case math.IsNaN(m.Temp):
 			a.hold("temp")
 		case m.Temp >= tempHighC:
-			a.alert(fmt.Sprintf("%s: %.1f°C", orDefault(m.TempChip, "<unknown sensor>"), m.Temp), "temp")
-		case a.prevKeys["temp"]:
-			a.recover(fmt.Sprintf("%s: %.1f°C", orDefault(m.TempChip, "<unknown sensor>"), m.Temp))
+			if s.tempHotSince.IsZero() {
+				s.tempHotSince = now
+			}
+			if now.Sub(s.tempHotSince) >= tempSustain {
+				a.alert(tempMsg, "temp")
+			} else {
+				a.hold("temp")
+			}
+		case m.Temp >= tempLowC:
+			s.tempHotSince = time.Time{}
+			a.hold("temp")
+		default:
+			s.tempHotSince = time.Time{}
+			if a.prevKeys["temp"] {
+				a.recover(tempMsg)
+			}
+		}
+
+		// Critical temperature alerts at once, independent of the sustain delay,
+		// and latches down to tempLowC.
+		switch {
+		case math.IsNaN(m.Temp):
+			a.hold("tempcrit")
+		case m.Temp >= tempCritC:
+			a.alert("critical "+tempMsg, "tempcrit")
+		case m.Temp >= tempLowC:
+			a.hold("tempcrit")
+		default:
+			if a.prevKeys["tempcrit"] {
+				a.recover("below critical, " + tempMsg)
+			}
 		}
 
 		if len(m.Alerts) > 0 {

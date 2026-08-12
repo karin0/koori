@@ -18,13 +18,14 @@ type ServerState struct {
 	Name   string
 	dialer Dialer
 
-	mu         sync.Mutex
-	session    Session
-	err        string
-	metrics    *MetricsSnapshot
-	pendingCnt []string // counter alerts queued until successfully delivered
-	alertAt    time.Time
-	alertKeys  map[string]bool
+	mu           sync.Mutex
+	session      Session
+	err          string
+	metrics      *MetricsSnapshot
+	pendingCnt   []string // counter alerts queued until successfully delivered
+	alertAt      time.Time
+	alertKeys    map[string]bool
+	tempHotSince time.Time // start of the current spell above tempHighC, zero when cool
 }
 
 func NewServerState(name string, dialer Dialer) *ServerState {
