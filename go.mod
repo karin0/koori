@@ -1,4 +1,4 @@
-module koori
+module github.com/karin0/koori
 
 go 1.26.4
 
