@@ -15,8 +15,8 @@ A server is either `ssh`, reached over SSH with keys checked against `known_host
 ## Running
 
 ```sh
-go build
-TELEGRAM_BOT_TOKEN=... ./koori [--debug] [--dry-run] [config.yaml]
+go install github.com/karin0/koori@latest
+TELEGRAM_BOT_TOKEN=... koori [--debug] [--dry-run] [config.yaml]
 ```
 
 | Variable | Meaning |
