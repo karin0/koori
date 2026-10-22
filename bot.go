@@ -159,7 +159,9 @@ func (a *app) onUpdate(ctx context.Context, b *bot.Bot, update *models.Update) {
 	}
 	slog.Debug("ctrl", "interval", a.ctrl.Interval(), "expanded", a.ctrl.Expanded())
 	a.ctrl.signalRefresh()
-	b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID})
+	if _, err := b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID}); err != nil {
+		slog.Warn("answer callback failed", "err", err)
+	}
 }
 
 func loadState() (map[string]int, error) {
@@ -256,11 +258,13 @@ func (a *app) awaitServers(ctx context.Context, ready <-chan struct{}) {
 		slog.Info(info)
 	}
 
-	a.bot.SendMessage(ctx, &bot.SendMessageParams{
+	if _, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:             a.alertChatID,
 		Text:               info,
 		LinkPreviewOptions: disabledPreview,
-	})
+	}); err != nil {
+		slog.Warn("startup notice failed", "err", err)
+	}
 }
 
 func (a *app) renderLoop(ctx context.Context, ready <-chan struct{}, cancel context.CancelFunc) {
