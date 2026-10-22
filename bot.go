@@ -267,24 +267,23 @@ func (a *app) awaitServers(ctx context.Context, ready <-chan struct{}) {
 	}
 }
 
-func (a *app) renderLoop(ctx context.Context, ready <-chan struct{}, cancel context.CancelFunc) {
-	defer cancel()
-
+// renderLoop returns nil once ctx is cancelled and an error when it cannot
+// obtain the panel message.
+func (a *app) renderLoop(ctx context.Context, ready <-chan struct{}) error {
 	msgID, err := a.ensurePanelMessage(ctx, "")
 	if err != nil {
-		slog.Error("ensure panel message failed", "err", err)
-		return
+		return fmt.Errorf("ensure panel message: %w", err)
 	}
 
 	a.awaitServers(ctx, ready)
 	if ctx.Err() != nil {
-		return
+		return nil
 	}
 
 	var scheduled, t0 time.Time
 	for {
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
 		text := renderPanel(ctx, a.servers, a.journal, a.ctrl)
 		checkAlerts(ctx, a.bot, a.alertChatID, a.servers, a.journal)
@@ -305,7 +304,7 @@ func (a *app) renderLoop(ctx context.Context, ready <-chan struct{}, cancel cont
 				slog.Warn("rate-limited", "retry_after", tooMany.RetryAfter)
 				select {
 				case <-ctx.Done():
-					return
+					return nil
 				case <-time.After(time.Duration(tooMany.RetryAfter) * time.Second):
 				}
 				continue
@@ -333,7 +332,7 @@ func (a *app) renderLoop(ctx context.Context, ready <-chan struct{}, cancel cont
 
 		refreshed := a.ctrl.waitRefresh(ctx, timeout)
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
 		if refreshed && a.ctrl.peekSkipUpdate() {
 			scheduled = t0.Add(a.ctrl.Interval())

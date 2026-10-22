@@ -26,6 +26,8 @@ TELEGRAM_BOT_TOKEN=... koori [--debug] [--dry-run] [config.yaml]
 
 `--dry-run` renders the panel to the terminal every 2 seconds and never contacts Telegram.
 
+koori exits with status 1 when it cannot set up the panel message at startup, so a supervisor that restarts on failure retries it.
+
 koori writes the ID of the panel message to `state.json` in the working directory, so a restart edits the same message. When editing fails with a bad request, for example after someone deleted the message, koori sends and pins a new one.
 
 The bot needs permission to pin messages in the panel chat. The buttons under the panel halve or double the refresh interval (1 to 60 seconds), refresh immediately, and expand or collapse the journal lines.

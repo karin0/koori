@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -47,8 +48,9 @@ func main() {
 
 	if *dryRun {
 		runDryRun(ctx, servers, journal, ctrl)
-	} else {
-		runBot(ctx, cfg, servers, journal, ctrl)
+	} else if err := runBot(ctx, cfg, servers, journal, ctrl); err != nil {
+		slog.Error("bot", "err", err)
+		os.Exit(1)
 	}
 	slog.Info("interrupted")
 }
@@ -128,10 +130,9 @@ func runDryRun(ctx context.Context, servers []*ServerState, journal *Journal, ct
 	}
 }
 
-func runBot(ctx context.Context, cfg *Config, servers []*ServerState, journal *Journal, ctrl *PanelControl) {
+func runBot(ctx context.Context, cfg *Config, servers []*ServerState, journal *Journal, ctrl *PanelControl) error {
 	if cfg.ChatID == 0 {
-		slog.Error("chat_id required")
-		os.Exit(1)
+		return errors.New("chat_id required")
 	}
 
 	a := &app{
@@ -143,8 +144,7 @@ func runBot(ctx context.Context, cfg *Config, servers []*ServerState, journal *J
 	}
 	b, err := buildBot(a)
 	if err != nil {
-		slog.Error("build bot", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("build bot: %w", err)
 	}
 	a.bot = b
 
@@ -158,11 +158,14 @@ func runBot(ctx context.Context, cfg *Config, servers []*ServerState, journal *J
 			s.Run(ctx, journal, ready)
 		})
 	}
+	var renderErr error
 	wg.Go(func() {
-		a.renderLoop(ctx, ready, cancel)
+		renderErr = a.renderLoop(ctx, ready)
+		cancel()
 	})
 
-	b.Start(ctx) // blocks until ctx is cancelled (signal or fatal render error)
+	b.Start(ctx) // blocks until ctx is cancelled (signal or render loop exit)
 	cancel()
 	wg.Wait()
+	return renderErr
 }
