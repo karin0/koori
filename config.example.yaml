@@ -8,7 +8,7 @@ alert_chat_id: 123456789
 known_hosts: ~/.ssh/known_hosts
 
 # Optional: default SSH identity for servers that omit identity_file. When unset,
-# we rely on ssh -G resolution (if use_ssh_config is true) or the SSH agent
+# we rely on ssh -G resolution (if resolve_with_ssh is true) or the SSH agent
 # ($SSH_AUTH_SOCK).
 #identity_file: ~/.ssh/id_ed25519
 
