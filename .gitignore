@@ -1,7 +1,6 @@
 /koori
 /config.yaml
 /state.json
-/deploy.sh
 .vscode
 .claude
 /tmp
