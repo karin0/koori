@@ -7,24 +7,32 @@ body { font-variant-numeric: tabular-nums; }
 .pre { white-space: pre-line; }
 .card + .card { margin-top: .5em; padding-top: .45em; border-top: 1px solid var(--tg-theme-section-separator-color, var(--tg-theme-secondary-bg-color)); }
 .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-.body { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
-.rings { display: flex; gap: 6px; flex: none; }
-.ring { position: relative; width: 46px; text-align: center; }
-.ring svg { display: block; width: 46px; height: 46px; transform: rotate(-90deg); }
-.ring circle { fill: none; }
+.body { font-size: clamp(.85em, (100vw - 24px) / 22.5, 1.25em); --d: 3.1em; display: flex; align-items: flex-start; gap: .8em; margin-top: 8px; }
+.rings { flex: 1; display: flex; justify-content: space-between; gap: .5em; }
+.ring { text-align: center; }
+.dial { position: relative; width: var(--d); margin: auto; }
+.dial svg { display: block; width: var(--d); height: var(--d); transform: rotate(-90deg); }
+.dial circle { fill: none; }
 .track { stroke: var(--tg-theme-secondary-bg-color); stroke-width: 5; }
-.arc { stroke: var(--tg-theme-button-color); stroke-width: 5; stroke-linecap: round; transition: stroke-dasharray .6s; }
+.arc { stroke: var(--lv); stroke-width: 5; stroke-linecap: round; transition: stroke-dasharray .6s; }
 .tick { stroke: var(--tg-theme-text-color); stroke-width: 8; }
-.high .arc { stroke: var(--tg-theme-destructive-text-color, #e53935); }
-.pct { position: absolute; top: 0; left: 0; right: 0; line-height: 46px; font-size: .8em; font-weight: 600; }
+.pct { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: .85em; font-weight: 600; }
 .lbl { font-size: .75em; line-height: 1.5; color: var(--tg-theme-hint-color); }
-.side, .usage { min-width: 0; line-height: 1.45; }
-.usage { margin-top: 4px; }
-.side i, .usage i { font-style: normal; color: var(--tg-theme-hint-color); }
-.spark { display: block; width: 100%; height: 16px; margin-top: 6px; }
-.spark path { fill: none; stroke: var(--tg-theme-button-color); stroke-width: 1.5; stroke-linejoin: round; }
+.use { font-size: .68em; white-space: nowrap; }
+.side { display: grid; grid-template-columns: auto auto; column-gap: 1em; line-height: 1.45; white-space: nowrap; }
+.uptime { margin-left: .4em; font-size: .85em; }
+.wide { grid-column: 1 / -1; }
+.side i { font-style: normal; color: var(--tg-theme-hint-color); }
+.spark { margin-top: 6px; }
+.spark svg { display: block; width: 100%; height: 16px; }
+.spark path { fill: none; stroke: var(--lv); stroke-width: 1.5; stroke-linejoin: round; }
+:root { --ok: #43a047; --warn: #ef9a00; --high: var(--tg-theme-destructive-text-color, #e53935); }
+.ok { --lv: var(--ok); }
+.warn { --lv: var(--warn); }
+.high { --lv: var(--high); }
+.warn, .high { color: var(--lv); }
 .stale, .stale .bad { color: var(--tg-theme-hint-color); }
-.stale .arc, .stale .spark path { stroke: var(--tg-theme-hint-color); }
+.stale .ok, .stale .warn, .stale .high { --lv: var(--tg-theme-hint-color); }
 @media (prefers-reduced-motion: reduce) { .arc { transition: none; } }
 </style>
 <div id="banner"></div>
@@ -67,26 +75,31 @@ function setHTML(el, html) {
   if (el.innerHTML !== html) el.innerHTML = html;
 }
 
-const ring = (label) => '<div class="ring"><svg viewBox="0 0 46 46">' +
+const ring = (label) => '<div class="ring"><div class="dial"><svg viewBox="0 0 46 46">' +
   '<circle class="track" cx="23" cy="23" r="' + R + '"/><circle class="arc" cx="23" cy="23" r="' + R + '"/>' +
-  '<circle class="tick" cx="23" cy="23" r="' + R + '"/></svg><span class="pct"></span><div class="lbl">' + label + '</div></div>';
+  '<circle class="tick" cx="23" cy="23" r="' + R + '"/></svg><span class="pct"></span></div>' +
+  '<div class="lbl">' + label + '</div><div class="use"></div></div>';
+
+const level = (v, warn, high) => v == null ? '' : v >= high ? 'high' : v >= warn ? 'warn' : 'ok';
 
 function card(name) {
   let el = cards.get(name);
   if (el) return el;
   el = document.createElement('div');
   el.className = 'card';
-  el.innerHTML = '<div class="head"><b></b><span class="age hint small"></span></div><div class="err bad small"></div>' +
+  el.innerHTML = '<div class="head"><span><b></b><span class="uptime hint"></span></span><span class="age hint small"></span></div><div class="err bad small"></div>' +
     '<div class="body"><div class="rings">' + ring('CPU') + ring('MEM') + ring('DISK') + '</div>' +
-    '<div class="side small"></div></div><div class="usage small"></div>' +
-    '<svg class="spark" viewBox="0 0 100 16" preserveAspectRatio="none"><path/></svg>' +
+    '<div class="side small"></div></div>' +
+    '<div class="spark"></div>' +
     '<div class="alerts bad small pre"></div>';
   cards.set(name, el);
   return el;
 }
 
-function setRing(el, pct, peak) {
-  el.classList.toggle('high', pct >= 90);
+function setRing(el, pct, peak, use) {
+  setText($(el, '.use'), use);
+  el = $(el, '.dial');
+  el.className = 'dial ' + level(pct, 75, 90);
   setText($(el, '.pct'), pct == null ? '—' : Math.round(pct) + '%');
   const arc = $(el, '.arc');
   arc.style.display = pct ? '' : 'none'; // a round cap draws a dot even for an empty arc
@@ -97,10 +110,24 @@ function setRing(el, pct, peak) {
   tick.setAttribute('stroke-dashoffset', .75 - Math.min(100, peak || 0) / 100 * C);
 }
 
+// spark draws the CPU history with a path for each run of segments at one level,
+// since the Android app draws gradient stops black.
 function spark(h) {
   if (!h || h.length < 2) return '';
-  const step = 100 / (h.length - 1);
-  return 'M' + [...h].map((c, i) => (i * step).toFixed(1) + ' ' + (15 - LEVELS.indexOf(c) / 35 * 14).toFixed(1)).join('L');
+  const v = [...h].map((c) => LEVELS.indexOf(c) / 35 * 100);
+  const pt = (i) => (i * 100 / (v.length - 1)).toFixed(1) + ' ' + (15 - v[i] * .14).toFixed(1);
+  const path = (cls, d) => '<path class="' + cls + '" d="' + d + '"></path>';
+  let paths = '', cls = '', d = '';
+  for (let i = 1; i < v.length; i++) {
+    const c = level(Math.max(v[i - 1], v[i]), 75, 90);
+    if (c !== cls) {
+      if (d) paths += path(cls, d);
+      cls = c;
+      d = 'M' + pt(i - 1);
+    }
+    d += 'L' + pt(i);
+  }
+  return '<svg viewBox="0 0 100 16" preserveAspectRatio="none">' + paths + path(cls, d) + '</svg>';
 }
 
 function update(el, s, now) {
@@ -111,28 +138,34 @@ function update(el, s, now) {
   const err = $(el, '.err');
   err.hidden = !(s.e || s.d);
   setText(err, (s.d ? 'offline: ' : '') + (s.e || 'unknown error'));
-  for (const sel of ['.body', '.usage', '.spark', '.alerts']) $(el, sel).hidden = !up;
+  setText($(el, '.uptime'), up ? 'up ' + span(s.t - s.b) : '');
+  for (const sel of ['.body', '.spark', '.alerts']) $(el, sel).hidden = !up;
   if (!up) return;
 
   const rings = el.querySelectorAll('.ring');
   const pct = (p) => p && p[1] ? 100 * p[0] / p[1] : null;
-  setRing(rings[0], s.c[0], s.c[1]);
-  setRing(rings[1], pct(s.m));
-  setRing(rings[2], pct(s.f));
-  // Every value here is a number the bot formatted, so the lines need no escaping.
+  // Units shared by both sides of a pair show once, as in 1.15/3.20G.
+  const use = (p) => {
+    if (!p) return '';
+    const a = size(p[0]), b = size(p[1]);
+    return (a.slice(-1) === b.slice(-1) ? a.slice(0, -1) : a) + '/' + b;
+  };
+  setRing(rings[0], s.c[0], s.c[1], s.k + ' cores');
+  setRing(rings[1], pct(s.m), null, use(s.m));
+  setRing(rings[2], pct(s.f), null, use(s.f));
+  // Every value here is a number the bot formatted, so the cells need no escaping.
   const rate = (r) => r == null ? '—' : size(r) + '/s';
-  const use = (p) => size(p[0]) + ' / ' + size(p[1]);
+  const graded = (v, warn, high, text) => '<span class="' + level(v, warn, high) + '">' + text + '</span>';
   setHTML($(el, '.side'), [
-    '<i>↓</i> ' + rate(s.rx[1]) + '\u2002<i>↑</i> ' + rate(s.tx[1]),
-    '<i>Σ ↓</i> ' + size(s.rx[0]) + '\u2002<i>↑</i> ' + size(s.tx[0]),
-    (s.T != null ? s.T + '°C <i>·</i> ' : '') + '<i>load</i> ' + s.l + ' <i>·</i> ' + s.k + ' <i>cores</i>',
-    '<i>up</i> ' + span(s.t - s.b) + (s.w ? ' <i>· swap</i> ' + size(s.w[0]) : ''),
-  ].join('<br>'));
-  setHTML($(el, '.usage'), '<i>MEM</i> ' + use(s.m) + (s.f ? '\u2003<i>DISK</i> ' + use(s.f) : ''));
+    '<i>↓</i> ' + rate(s.rx[1]), '<i>↑</i> ' + rate(s.tx[1]),
+    '<i>Σ↓</i> ' + size(s.rx[0]), '<i>Σ↑</i> ' + size(s.tx[0]),
+    s.T != null ? '<i>temp</i> ' + graded(s.T, 75, 90, s.T + '°C') : '', s.w ? '<i>swap</i> ' + size(s.w[0]) : '',
+  ].filter(Boolean).map((c) => '<div>' + c + '</div>').join('') +
+    '<div class="wide"><i>load</i> ' + graded(s.l / s.k, 1, 2, s.l) + '</div>');
 
-  const d = spark(s.h);
-  $(el, '.spark').hidden = !d;
-  $(el, '.spark path').setAttribute('d', d);
+  const sp = spark(s.h);
+  $(el, '.spark').hidden = !sp;
+  setHTML($(el, '.spark'), sp);
   setText($(el, '.alerts'), (s.a || []).map((a) => '⚠️ ' + a).join('\n'));
 }
 
