@@ -63,7 +63,7 @@ type metricsData struct {
 	FS       []num    `json:"f,omitzero"` // used and total bytes of /
 	Rx       [2]num   `json:"rx"`         // total bytes and bytes per second
 	Tx       [2]num   `json:"tx"`         // total bytes and bytes per second
-	Load     num      `json:"l"`
+	Load     [3]num   `json:"l"`          // 1, 5 and 15 minute averages
 	Boot     int64    `json:"b"`
 	Temp     num      `json:"T,omitzero"`
 	Alerts   []string `json:"a,omitzero"`
@@ -112,7 +112,7 @@ func newServerData(s *ServerState) serverData {
 			FS:       usage(m.FSUsed, m.FSTotal),
 			Rx:       [2]num{num(m.Rx), num(m.RxBps)},
 			Tx:       [2]num{num(m.Tx), num(m.TxBps)},
-			Load:     num(m.Load1),
+			Load:     [3]num{num(m.Load[0]), num(m.Load[1]), num(m.Load[2])},
 			Boot:     int64(m.BootTime),
 			Temp:     num(m.Temp),
 			Alerts:   m.Alerts,

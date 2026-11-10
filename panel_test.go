@@ -55,7 +55,7 @@ func TestPanelDataFitsThreeServers(t *testing.T) {
 			SwapUsed: 1234567890, SwapTotal: 8589934592,
 			FSUsed: 123456789012, FSTotal: 512110190592,
 			Rx: 1234567890123, Tx: 987654321098, RxBps: 12345678.912, TxBps: 1234567.891,
-			Temp: 67.891, Load1: 12.345, BootTime: 1760000000,
+			Temp: 67.891, Load: [3]float64{12.345, 23.456, 34.567}, BootTime: 1760000000,
 			Alerts: []string{"Conntrack: 52429/65536"},
 		}
 		for range historyLen {

@@ -161,7 +161,7 @@ function update(el, s, now) {
     '<i>Σ↓</i> ' + size(s.rx[0]), '<i>Σ↑</i> ' + size(s.tx[0]),
     s.T != null ? '<i>temp</i> ' + graded(s.T, 75, 90, s.T + '°C') : '', s.w ? '<i>swap</i> ' + size(s.w[0]) : '',
   ].filter(Boolean).map((c) => '<div>' + c + '</div>').join('') +
-    '<div class="wide"><i>load</i> ' + graded(s.l / s.k, 1, 2, s.l) + '</div>');
+    '<div class="wide"><i>load</i> ' + s.l.map((v) => graded(v / s.k, 1, 2, v)).join(' <i>·</i> ') + '</div>');
 
   const sp = spark(s.h);
   $(el, '.spark').hidden = !sp;

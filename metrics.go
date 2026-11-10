@@ -34,6 +34,8 @@ var scalarKeys = func() map[string]struct{} {
 		"node_time_seconds",
 		"node_scrape_collector_duration_seconds",
 		"node_load1",
+		"node_load5",
+		"node_load15",
 		"node_boot_time_seconds",
 		"node_memory_MemTotal_bytes",
 		"node_memory_MemAvailable_bytes",
@@ -75,7 +77,7 @@ type MetricsSnapshot struct {
 	TxBps      float64
 	Temp       float64
 	TempChip   string
-	Load1      float64
+	Load       [3]float64 // 1, 5 and 15 minute averages
 	BootTime   float64
 	Alerts     []string
 	CntAlerts  []string
@@ -274,7 +276,7 @@ func parseMetrics(name string, prev *MetricsSnapshot, text string) *MetricsSnaps
 		TxBps:      txBps,
 		Temp:       tempMax,
 		TempChip:   tempChip,
-		Load1:      scalars["node_load1"],
+		Load:       [3]float64{scalars["node_load1"], scalars["node_load5"], scalars["node_load15"]},
 		BootTime:   scalars["node_boot_time_seconds"],
 		Alerts:     alerts,
 		CntAlerts:  cntAlerts,
