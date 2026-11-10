@@ -1,25 +1,164 @@
 package main
 
 import (
-	"context"
-	"fmt"
+	"bytes"
+	_ "embed"
+	"encoding/json"
 	"html"
 	"log/slog"
 	"math"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
-	"sync"
-	"time"
 	"unicode/utf8"
 )
 
 const (
-	tgMessageLimit = 4096 // Telegram MAX_TEXT_LENGTH, post-parse
-	lineTrim       = 180
-	barWidth       = 10
+	tgMessageLimit  = 4096 // Telegram MAX_TEXT_LENGTH, post-parse
+	widgetDataLimit = 1024 // bytes of a widget answer
+	lineTrim        = 180
+	errTrim         = 80
+	journalLines    = 7
 )
 
-var partials = []rune("▏▎▍▌▋▊▉")
+// panelHTML draws the JSON array that panelData encodes.
+//
+//go:embed panel.html
+var panelHTML string
+
+// num marshals with three significant digits, the precision panel.html shows.
+// NaN marshals as null, and a NaN field is omitted.
+type num float64
+
+func (n num) IsZero() bool { return math.IsNaN(float64(n)) }
+
+func (n num) MarshalJSON() ([]byte, error) {
+	if n.IsZero() {
+		return []byte("null"), nil
+	}
+	b := strconv.AppendFloat(nil, float64(n), 'g', 3, 64)
+	b = bytes.Replace(b, []byte("e+0"), []byte("e"), 1)
+	return bytes.Replace(b, []byte("e+"), []byte("e"), 1), nil
+}
+
+// serverData is one server's entry in the panel data. Keys are short and pairs
+// are arrays to fit several servers in a widget answer.
+type serverData struct {
+	Name string `json:"n"`
+	Down bool   `json:"d,omitzero"`
+	Err  string `json:"e,omitzero"`
+	Seen int64  `json:"s,omitzero"` // time of the last scrape of a down server
+	*metricsData
+}
+
+type metricsData struct {
+	Time     int64    `json:"t"`
+	FetchMs  num      `json:"q"`
+	ScrapeMs num      `json:"x"`
+	CPU      [2]num   `json:"c"` // average and busiest core, percent
+	Cores    int      `json:"k"`
+	Mem      [2]num   `json:"m"`          // used and total bytes
+	Swap     []num    `json:"w,omitzero"` // used and total bytes
+	FS       []num    `json:"f,omitzero"` // used and total bytes of /
+	Rx       [2]num   `json:"rx"`         // total bytes and bytes per second
+	Tx       [2]num   `json:"tx"`         // total bytes and bytes per second
+	Load     num      `json:"l"`
+	Boot     int64    `json:"b"`
+	Temp     num      `json:"T,omitzero"`
+	Alerts   []string `json:"a,omitzero"`
+	History  string   `json:"h,omitzero"` // CPU history, a level character per point
+}
+
+// historyLevels encodes a CPU percent of 0 to 100 as one character.
+const historyLevels = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+func encodeHistory(points []float64) string {
+	b := make([]byte, len(points))
+	for i, p := range points {
+		b[i] = historyLevels[int(math.Round(max(0, min(100, p))/100*float64(len(historyLevels)-1)))]
+	}
+	return string(b)
+}
+
+// usage pairs used and total bytes, or returns nil when there is no total.
+func usage(used, total int64) []num {
+	if total == 0 {
+		return nil
+	}
+	return []num{num(used), num(total)}
+}
+
+func newServerData(s *ServerState) serverData {
+	sess, errMsg, m := s.snapshot()
+	d := serverData{
+		Name: s.Name,
+		Down: sess == nil,
+		Err:  truncateRunes(errMsg, errTrim, "…"),
+	}
+	switch {
+	case m == nil:
+	case d.Down:
+		d.Seen = int64(m.Timestamp)
+	default:
+		d.metricsData = &metricsData{
+			Time:     int64(m.Timestamp),
+			FetchMs:  num(m.FetchTime * 1e3),
+			ScrapeMs: num(m.ScrapeTime * 1e3),
+			CPU:      [2]num{num(m.CPUPct), num(m.CPUMaxPct)},
+			Cores:    m.CPUCount,
+			Mem:      [2]num{num(m.MemUsed), num(m.MemTotal)},
+			Swap:     usage(m.SwapUsed, m.SwapTotal),
+			FS:       usage(m.FSUsed, m.FSTotal),
+			Rx:       [2]num{num(m.Rx), num(m.RxBps)},
+			Tx:       [2]num{num(m.Tx), num(m.TxBps)},
+			Load:     num(m.Load1),
+			Boot:     int64(m.BootTime),
+			Temp:     num(m.Temp),
+			Alerts:   m.Alerts,
+			History:  encodeHistory(s.history()),
+		}
+	}
+	return d
+}
+
+// panelData encodes the servers for panel.html, dropping trailing servers that
+// do not fit a widget answer.
+func panelData(servers []*ServerState) ([]byte, error) {
+	entries := make([]serverData, len(servers))
+	for i, s := range servers {
+		entries[i] = newServerData(s)
+	}
+	for n := len(entries); ; n-- {
+		data, err := json.Marshal(entries[:n])
+		if err != nil {
+			return nil, err
+		}
+		if len(data) <= widgetDataLimit {
+			if n < len(entries) {
+				slog.Error("panel data too large", "shown", n, "servers", len(entries))
+			}
+			return data, nil
+		}
+	}
+}
+
+// renderJournal renders the newest journal lines, or every buffered line
+// oldest first when expanded.
+func renderJournal(journal *Journal, expanded bool) string {
+	limit := journalLines
+	if expanded {
+		limit = math.MaxInt
+	}
+	rows, _ := fitStream(journal.messagesNewest(nil, limit), 0)
+	if len(rows) == 0 {
+		return "<i>no journal lines</i>"
+	}
+	if expanded {
+		slices.Reverse(rows)
+	}
+	return "<pre>" + html.EscapeString(strings.Join(rows, "\n")) + "</pre>"
+}
 
 var tagRE = regexp.MustCompile(`<[^>]+>`)
 
@@ -27,112 +166,6 @@ var tagRE = regexp.MustCompile(`<[^>]+>`)
 // HTML entities decode to a single character.
 func effLen(s string) int {
 	return utf8.RuneCountInString(html.UnescapeString(tagRE.ReplaceAllString(s, "")))
-}
-
-func fmtSize(x float64) string {
-	for _, unit := range []string{"B", "K", "M", "G", "T"} {
-		if x < 1024 {
-			return fmt.Sprintf("%.1f%s", x, unit)
-		}
-		x /= 1024
-	}
-	return fmt.Sprintf("%.1fP", x)
-}
-
-func fmtBps(x float64) string {
-	if math.IsNaN(x) {
-		return "  —  "
-	}
-	for _, unit := range []string{"B/s", "K/s", "M/s", "G/s", "T/s"} {
-		if x < 1024 {
-			return fmt.Sprintf("%5.1f%s", x, unit)
-		}
-		x /= 1024
-	}
-	return fmt.Sprintf("%5.1fP/s", x)
-}
-
-func fmtDuration(t float64) string {
-	switch {
-	case t < 1e-3:
-		return fmt.Sprintf("%.1fµs", t*1e6)
-	case t < 1:
-		return fmt.Sprintf("%.1fms", t*1e3)
-	default:
-		return fmt.Sprintf("%.1fs", t)
-	}
-}
-
-func clampPct(v float64) float64 { return max(0, min(100, v)) }
-
-func bar(pct float64) string {
-	if math.IsNaN(pct) {
-		return strings.Repeat("─", barWidth)
-	}
-	eighths := int(clampPct(pct)/100*barWidth*8 + 0.5)
-	full, rem := eighths/8, eighths%8
-	var b strings.Builder
-	b.WriteString(strings.Repeat("█", full))
-	if rem > 0 && full < barWidth {
-		b.WriteRune(partials[rem-1])
-		full++
-	}
-	b.WriteString(strings.Repeat("░", barWidth-full))
-	return b.String()
-}
-
-func barDual(avg, peak float64) string {
-	if math.IsNaN(avg) {
-		return strings.Repeat("─", barWidth)
-	}
-	avgC := clampPct(avg)
-	peakC := avgC
-	if !math.IsNaN(peak) {
-		peakC = max(avgC, min(100, peak))
-	}
-
-	eighths := int(avgC/100*barWidth*8 + 0.5)
-	full, rem := eighths/8, eighths%8
-	var b strings.Builder
-	b.WriteString(strings.Repeat("█", full))
-	used := full
-	if rem > 0 && full < barWidth {
-		b.WriteRune(partials[rem-1])
-		used++
-	}
-	if peakChars := int(peakC/100*barWidth + 0.5); peakChars > used {
-		b.WriteString(strings.Repeat("▒", peakChars-used))
-		used = peakChars
-	}
-	b.WriteString(strings.Repeat("░", barWidth-used))
-	return b.String()
-}
-
-func pctStr(pct float64) string {
-	if math.IsNaN(pct) {
-		return "  —  "
-	}
-	return fmt.Sprintf("%4.1f%%", pct)
-}
-
-func gauge(label string, pct float64, used, total int64) string {
-	row := fmt.Sprintf("%-3s %s %s", label, bar(pct), pctStr(pct))
-	if total > 0 {
-		row += fmt.Sprintf(" %6s / %6s", fmtSize(float64(used)), fmtSize(float64(total)))
-	}
-	return row
-}
-
-func cpuRow(avg, peak float64, count int) string {
-	cores := ""
-	if count > 0 {
-		cores = fmt.Sprintf(" / %6s", fmt.Sprintf("%dx", count))
-	}
-	peakS := ""
-	if !math.IsNaN(peak) {
-		peakS = fmt.Sprintf(" %6s", strings.TrimSpace(pctStr(peak)))
-	}
-	return fmt.Sprintf("CPU %s %s%s%s", barDual(avg, peak), pctStr(avg), peakS, cores)
 }
 
 func trimLine(line string) string {
@@ -161,101 +194,6 @@ func truncateRunes(s string, limit int, suffix string) string {
 		count++
 	}
 	return s + suffix
-}
-
-// hm formats a time as H:MM:SS with the leading zero stripped.
-func hm(t time.Time) string {
-	return strings.TrimLeft(t.Format("15:04:05"), "0")
-}
-
-func renderServer(ctx context.Context, s *ServerState, skipUpdate bool) []string {
-	name := "<b>" + html.EscapeString(s.Name) + "</b>"
-	sess, errMsg, m := s.snapshot()
-	if sess == nil {
-		line := "offline: " + html.EscapeString(orDefault(errMsg, "<unknown>"))
-		if m != nil {
-			line += fmt.Sprintf(` (last seen <tg-time unix="%d" format="r">%s</tg-time>)`,
-				int64(m.Timestamp), hm(time.Unix(int64(m.Timestamp), 0)))
-		}
-		return []string{"🔴 " + name, line}
-	}
-
-	header := ""
-	dt := ""
-	if skipUpdate && m != nil {
-		// keep last snapshot, no fetch
-	} else {
-		t0 := time.Now()
-		fresh, err := s.refreshMetrics(ctx, sess)
-		elapsed := time.Since(t0).Seconds()
-		if err != nil {
-			slog.Error("fetch metrics failed", "server", s.Name, "err", err)
-			errLine := "error: " + html.EscapeString(err.Error())
-			if m == nil {
-				return []string{"🟡 " + name, errLine}
-			}
-			header = "🟡 " + name + "\n" + errLine
-		} else {
-			m = fresh
-		}
-		dt = fmtDuration(elapsed) + ", "
-	}
-
-	if header == "" {
-		date := hm(time.Unix(int64(m.Timestamp), 0))
-		header = fmt.Sprintf(`🟢 %s  (%s%s, <tg-time unix="%d" format="r">%s</tg-time>)`,
-			name, dt, fmtDuration(m.ScrapeTime), int64(m.Timestamp), date)
-	}
-
-	var rows []string
-	rows = append(rows, cpuRow(m.CPUPct, m.CPUMaxPct, m.CPUCount))
-	rows = append(rows, gauge("MEM", pctOf(m.MemUsed, m.MemTotal), m.MemUsed, m.MemTotal))
-	if m.SwapTotal > 0 {
-		rows = append(rows, gauge("SWP", pctOf(m.SwapUsed, m.SwapTotal), m.SwapUsed, m.SwapTotal))
-	}
-	if m.FSMount != "" {
-		rows = append(rows, gauge(m.FSMount, pctOf(m.FSUsed, m.FSTotal), m.FSUsed, m.FSTotal))
-	}
-	rows = append(rows, fmt.Sprintf("NET ↓%s (%s) ↑%s (%s)",
-		fmtBps(m.RxBps), fmtSize(m.Rx), fmtBps(m.TxBps), fmtSize(m.Tx)))
-
-	rows = append(rows, fmt.Sprintf("Load: %.2f | Up: %s", m.Load1, uptime(m.Timestamp, m.BootTime)))
-	if !math.IsNaN(m.Temp) {
-		rows[len(rows)-1] += fmt.Sprintf(" | %.1f°C", m.Temp)
-	}
-	if len(m.Alerts) > 0 {
-		rows = append(rows, "⚠️ "+strings.Join(m.Alerts, " | "))
-	}
-
-	return []string{header, "<pre>" + html.EscapeString(strings.Join(rows, "\n")) + "</pre>"}
-}
-
-func uptime(ts, boot float64) string {
-	total := int64(ts - boot)
-	days, rem := total/86400, total%86400
-	hours, secs := rem/3600, rem%3600
-
-	var parts []string
-	if days > 0 {
-		parts = append(parts, fmt.Sprintf("%dd", days))
-	}
-	if hours > 0 {
-		parts = append(parts, fmt.Sprintf("%dh", hours))
-	}
-	if days == 0 && secs >= 60 {
-		parts = append(parts, fmt.Sprintf("%dm", secs/60))
-	}
-	if len(parts) == 0 {
-		parts = append(parts, fmt.Sprintf("%ds", secs))
-	}
-	return strings.Join(parts, " ")
-}
-
-func pctOf(used, total int64) float64 {
-	if total <= 0 {
-		return math.NaN()
-	}
-	return 100 * float64(used) / float64(total)
 }
 
 func orDefault(s, fallback string) string {
@@ -300,58 +238,4 @@ func quoteLines(lines []string) string {
 	}
 	b.WriteString("</blockquote>")
 	return b.String()
-}
-
-func renderPanel(ctx context.Context, servers []*ServerState, journal *Journal, ctrl *PanelControl) string {
-	skip := ctrl.takeSkipUpdate()
-
-	blocks := make([][]string, len(servers))
-	var wg sync.WaitGroup
-	for i, s := range servers {
-		wg.Go(func() {
-			blocks[i] = renderServer(ctx, s, skip)
-		})
-	}
-	wg.Wait()
-
-	join := func(bs [][]string) string {
-		parts := make([]string, len(bs))
-		for i, b := range bs {
-			parts[i] = strings.Join(b, "\n")
-		}
-		return strings.Join(parts, "\n")
-	}
-
-	text := join(blocks)
-	eff := effLen(text)
-	for eff > tgMessageLimit && len(blocks) > 1 {
-		blocks = blocks[:len(blocks)-1]
-		text = join(blocks)
-		eff = effLen(text)
-	}
-	if eff > tgMessageLimit {
-		return fmt.Sprintf("<i>panel too large to render (%d chars)</i>", eff)
-	}
-
-	expanded := ctrl.Expanded()
-	limit := 7
-	if expanded {
-		limit = math.MaxInt
-	}
-	all := journal.messagesNewest(nil, limit)
-	rows, eff := fitStream(all, eff)
-	if len(rows) > 0 {
-		if expanded {
-			reverse(rows)
-		}
-		text += "<pre>" + html.EscapeString(strings.Join(rows, "\n")) + "</pre>"
-	}
-	slog.Debug("render_panel", "journal", len(rows), "total", len(all), "len", len(text), "eff", eff)
-	return text
-}
-
-func reverse(s []string) {
-	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
-		s[i], s[j] = s[j], s[i]
-	}
 }

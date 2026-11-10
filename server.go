@@ -3,12 +3,17 @@ package main
 import (
 	"context"
 	"log/slog"
+	"math"
 	"slices"
 	"sync"
 	"time"
 )
 
-const reconnectBackoffMax = 60 * time.Second
+const (
+	reconnectBackoffMax = 60 * time.Second
+	historyStep         = 30 // seconds of CPU usage averaged into one history point
+	historyLen          = 20
+)
 
 // ServerState holds the live, mutable state for one monitored server. Its
 // fields are read by the render/alert paths while the run loop mutates them, so
@@ -20,48 +25,110 @@ type ServerState struct {
 
 	mu           sync.Mutex
 	session      Session
-	err          string
+	err          string // why the session is down
+	fetchErr     string // why the last scrape of the live session failed
 	metrics      *MetricsSnapshot
 	pendingCnt   []string // counter alerts queued until successfully delivered
 	alertAt      time.Time
 	alertKeys    map[string]bool
 	tempHotSince time.Time // start of the current spell above tempHighC, zero when cool
+
+	cpuHistory []float64 // average CPU percent of each historyStep, oldest first
+	histStart  float64   // scrape time that opened the current step
+	histSum    float64
+	histN      int
 }
 
 func NewServerState(name string, dialer Dialer) *ServerState {
 	return &ServerState{Name: name, dialer: dialer, alertKeys: map[string]bool{}}
 }
 
+// snapshot returns the session, the error of the session when it is down or of
+// the last scrape otherwise, and the last metrics.
 func (s *ServerState) snapshot() (Session, string, *MetricsSnapshot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.session, s.err, s.metrics
+	if s.session == nil {
+		return nil, s.err, s.metrics
+	}
+	return s.session, s.fetchErr, s.metrics
 }
 
 func (s *ServerState) setSession(sess Session, err string) {
 	s.mu.Lock()
-	s.session, s.err = sess, err
+	s.session, s.err, s.fetchErr = sess, err, ""
 	s.mu.Unlock()
 }
 
 // refreshMetrics scrapes and parses a fresh snapshot, publishing it as the new
 // baseline for the next rate computation.
-func (s *ServerState) refreshMetrics(ctx context.Context, sess Session) (*MetricsSnapshot, error) {
+func (s *ServerState) refreshMetrics(ctx context.Context, sess Session) error {
+	t0 := time.Now()
 	text, err := sess.FetchMetrics(ctx)
 	if err != nil {
-		return nil, err
+		s.mu.Lock()
+		s.fetchErr = err.Error()
+		s.mu.Unlock()
+		return err
 	}
+	fetchTime := time.Since(t0).Seconds()
+
 	s.mu.Lock()
 	prev := s.metrics
 	s.mu.Unlock()
 
 	m := parseMetrics(s.Name, prev, text)
+	m.FetchTime = fetchTime
 
 	s.mu.Lock()
 	s.metrics = m
+	s.fetchErr = ""
 	s.pendingCnt = append(s.pendingCnt, m.CntAlerts...)
+	s.recordCPU(m)
 	s.mu.Unlock()
-	return m, nil
+	return nil
+}
+
+// recordCPU folds a scrape into the CPU history. The caller holds mu.
+func (s *ServerState) recordCPU(m *MetricsSnapshot) {
+	if math.IsNaN(m.CPUPct) {
+		return
+	}
+	if s.histN == 0 && s.histStart == 0 {
+		s.histStart = m.Timestamp
+	}
+	s.histSum += m.CPUPct
+	s.histN++
+	if m.Timestamp-s.histStart >= historyStep {
+		s.cpuHistory = append(s.cpuHistory, s.histSum/float64(s.histN))
+		if len(s.cpuHistory) > historyLen {
+			s.cpuHistory = s.cpuHistory[1:]
+		}
+		s.histStart, s.histSum, s.histN = m.Timestamp, 0, 0
+	}
+}
+
+func (s *ServerState) history() []float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.cpuHistory)
+}
+
+// scrape refreshes the metrics of every connected server concurrently.
+func scrape(ctx context.Context, servers []*ServerState) {
+	var wg sync.WaitGroup
+	for _, s := range servers {
+		sess, _, _ := s.snapshot()
+		if sess == nil {
+			continue
+		}
+		wg.Go(func() {
+			if err := s.refreshMetrics(ctx, sess); err != nil {
+				slog.Error("fetch metrics failed", "server", s.Name, "err", err)
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // pendingAlerts returns the queued counter alerts without consuming them;

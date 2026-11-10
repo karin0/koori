@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -18,95 +18,27 @@ import (
 )
 
 const (
-	stateFile       = "state.json"
-	defaultInterval = 5 * time.Second
-	minInterval     = 1 * time.Second
-	maxInterval     = 60 * time.Second
-	httpTimeout     = 30 * time.Second
-	pollTimeout     = 30 * time.Second
+	stateFile      = "state.json"
+	scrapeInterval = 5 * time.Second
+	httpTimeout    = 30 * time.Second
+	pollTimeout    = 30 * time.Second
 )
 
 func ptr[T any](v T) *T { return &v }
 
 var disabledPreview = &models.LinkPreviewOptions{IsDisabled: ptr(true)}
 
-// PanelControl is the shared control surface mutated by inline-button
-// callbacks and read by the render loop.
-type PanelControl struct {
-	interval   atomic.Int64
-	expanded   atomic.Bool
-	skipUpdate atomic.Bool
-	refresh    chan struct{}
-}
-
-func NewPanelControl() *PanelControl {
-	c := &PanelControl{
-		refresh: make(chan struct{}, 1),
-	}
-	c.interval.Store(int64(defaultInterval))
-	return c
-}
-
-func (c *PanelControl) Interval() time.Duration {
-	return time.Duration(c.interval.Load())
-}
-
-func (c *PanelControl) Expanded() bool {
-	return c.expanded.Load()
-}
-
-// takeSkipUpdate reports and clears the skip flag; the render path consumes it
-// so a single button press skips exactly one metrics fetch.
-func (c *PanelControl) takeSkipUpdate() bool {
-	return c.skipUpdate.Swap(false)
-}
-
-func (c *PanelControl) peekSkipUpdate() bool {
-	return c.skipUpdate.Load()
-}
-
-// slower, faster and toggleLog are only called from the serialized onUpdate
-// handler.
-func (c *PanelControl) slower() {
-	c.interval.Store(int64(min(maxInterval, c.Interval()*2)))
-}
-
-func (c *PanelControl) faster() {
-	c.interval.Store(int64(max(minInterval, c.Interval()/2)))
-}
-
-func (c *PanelControl) toggleLog() {
-	c.expanded.Store(!c.expanded.Load())
-	c.skipUpdate.Store(true)
-}
-
-func (c *PanelControl) signalRefresh() {
-	select {
-	case c.refresh <- struct{}{}:
-	default:
-	}
-}
-
-func (c *PanelControl) waitRefresh(ctx context.Context, timeout time.Duration) bool {
-	t := time.NewTimer(timeout)
-	defer t.Stop()
-	select {
-	case <-c.refresh:
-		return true
-	case <-t.C:
-		return false
-	case <-ctx.Done():
-		return false
-	}
-}
-
 type app struct {
 	bot         *bot.Bot
-	ctrl        *PanelControl
 	chatID      int64
 	alertChatID int64
 	servers     []*ServerState
 	journal     *Journal
+
+	// expanded is flipped by the journal button and read by the render loop,
+	// which toggled wakes.
+	expanded atomic.Bool
+	toggled  chan struct{}
 }
 
 func buildBot(a *app) (*bot.Bot, error) {
@@ -117,10 +49,13 @@ func buildBot(a *app) (*bot.Bot, error) {
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(a.onUpdate),
-		bot.WithAllowedUpdates(bot.AllowedUpdates{"callback_query"}),
+		bot.WithAllowedUpdates(bot.AllowedUpdates{
+			models.AllowedUpdateCallbackQuery,
+			models.AllowedUpdateWidgetQuery,
+		}),
 		bot.WithHTTPClient(pollTimeout, &http.Client{Timeout: httpTimeout + pollTimeout}),
-		// Handlers run serially, so onUpdate never races itself: the control
-		// fields need only atomic load/store, not compare-and-swap.
+		// Handlers run serially, so onUpdate never races itself and expanded
+		// needs only atomic load and store.
 		bot.WithNotAsyncHandlers(),
 	}
 	if local := os.Getenv("LOCAL_SERVER"); local != "" {
@@ -129,103 +64,208 @@ func buildBot(a *app) (*bot.Bot, error) {
 	return bot.New(token, opts...)
 }
 
-func keyboard(ctrl *PanelControl) *models.InlineKeyboardMarkup {
-	logIcon := "📜"
-	if ctrl.Expanded() {
-		logIcon = "📃"
+func journalKeyboard(expanded bool) *models.InlineKeyboardMarkup {
+	icon := "📜"
+	if expanded {
+		icon = "📃"
 	}
 	return &models.InlineKeyboardMarkup{
-		InlineKeyboard: [][]models.InlineKeyboardButton{{
-			{Text: "🐢", CallbackData: "slower"},
-			{Text: "🔄" + hm(time.Now()), CallbackData: "refresh"},
-			{Text: "🐇", CallbackData: "faster"},
-			{Text: fmt.Sprintf("%s%gs", logIcon, ctrl.Interval().Seconds()), CallbackData: "log"},
-		}},
+		InlineKeyboard: [][]models.InlineKeyboardButton{{{Text: icon, CallbackData: "log"}}},
 	}
 }
 
 func (a *app) onUpdate(ctx context.Context, b *bot.Bot, update *models.Update) {
-	cb := update.CallbackQuery
-	if cb == nil || cb.Message.Message == nil || cb.Message.Message.Chat.ID != a.chatID {
+	switch {
+	case update.WidgetQuery != nil:
+		a.answerPanel(ctx, update.WidgetQuery)
+	case update.CallbackQuery != nil:
+		a.toggleJournal(ctx, update.CallbackQuery)
+	}
+}
+
+// answerPanel answers every widget query from the panel chat with the latest
+// metrics, whatever its data.
+func (a *app) answerPanel(ctx context.Context, q *models.WidgetQuery) {
+	if q.Chat == nil || q.Chat.ID != a.chatID {
 		return
 	}
-	switch cb.Data {
-	case "slower":
-		a.ctrl.slower()
-	case "faster":
-		a.ctrl.faster()
-	case "log":
-		a.ctrl.toggleLog()
+	data, err := panelData(a.servers)
+	if err != nil {
+		slog.Error("encode panel data", "err", err)
 	}
-	slog.Debug("ctrl", "interval", a.ctrl.Interval(), "expanded", a.ctrl.Expanded())
-	a.ctrl.signalRefresh()
-	if _, err := b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID}); err != nil {
+	if _, err := a.bot.AnswerWidgetQuery(ctx, &bot.AnswerWidgetQueryParams{
+		WidgetQueryID: q.ID,
+		Data:          string(data),
+	}); err != nil {
+		slog.Warn("answer widget query failed", "err", err)
+	}
+}
+
+func (a *app) toggleJournal(ctx context.Context, cb *models.CallbackQuery) {
+	if cb.Message.Message == nil || cb.Message.Message.Chat.ID != a.chatID || cb.Data != "log" {
+		return
+	}
+	a.expanded.Store(!a.expanded.Load())
+	select {
+	case a.toggled <- struct{}{}:
+	default:
+	}
+	if _, err := a.bot.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID}); err != nil {
 		slog.Warn("answer callback failed", "err", err)
 	}
 }
 
-func loadState() (map[string]int, error) {
-	data, err := os.ReadFile(stateFile)
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]int{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	state := map[string]int{}
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, err
-	}
-	return state, nil
+// panelState records the messages of the running panel, so that the next start
+// can delete them.
+type panelState struct {
+	ChatID  int64 `json:"chat_id"`
+	Panel   int   `json:"panel"`
+	Journal int   `json:"journal"`
 }
 
-func saveState(state map[string]int) error {
-	data, err := json.Marshal(state)
+func loadState() (panelState, error) {
+	var st panelState
+	data, err := os.ReadFile(stateFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return st, nil
+	}
+	if err != nil {
+		return st, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&st); err != nil {
+		return st, fmt.Errorf("%s: %w", stateFile, err)
+	}
+	return st, nil
+}
+
+func saveState(st panelState) error {
+	data, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(stateFile, data, 0o644)
 }
 
-// ensurePanelMessage returns the pinned panel message id, reusing the persisted
-// one when text is empty (startup) and otherwise sending and pinning a fresh
-// message (recovery after a failed edit).
-func (a *app) ensurePanelMessage(ctx context.Context, text string) (int, error) {
-	state, err := loadState()
+func (a *app) sendJournal(ctx context.Context, text string, expanded bool) (*models.Message, error) {
+	return a.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:              a.chatID,
+		Text:                text,
+		ParseMode:           models.ParseModeHTML,
+		LinkPreviewOptions:  disabledPreview,
+		DisableNotification: true,
+		ReplyMarkup:         journalKeyboard(expanded),
+	})
+}
+
+// startPanel sends the journal message and then the panel widget under it,
+// pins the widget and deletes the messages of the previous run. Every start
+// sends a new widget, since a sent widget keeps its HTML forever.
+func (a *app) startPanel(ctx context.Context) (panelState, error) {
+	old, err := loadState()
 	if err != nil {
-		return 0, err
-	}
-	key := strconv.FormatInt(a.chatID, 10)
-	if text == "" {
-		if id, ok := state[key]; ok {
-			return id, nil
-		}
-		text = "starting…"
+		return panelState{}, err
 	}
 
-	msg, err := a.bot.SendRichMessage(ctx, &bot.SendRichMessageParams{
-		ChatID:      a.chatID,
-		RichMessage: models.InputRichMessage{HTML: text},
-		ReplyMarkup: keyboard(a.ctrl),
+	journal, err := a.sendJournal(ctx, renderJournal(a.journal, false), false)
+	if err != nil {
+		return panelState{}, err
+	}
+	panel, err := a.bot.SendWidget(ctx, &bot.SendWidgetParams{
+		ChatID:              a.chatID,
+		HTML:                panelHTML,
+		AllowQueries:        true,
+		DisableNotification: true,
 	})
 	if err != nil {
-		return 0, err
+		return panelState{}, err
 	}
-	if _, err := a.bot.PinChatMessage(ctx, &bot.PinChatMessageParams{ChatID: a.chatID, MessageID: msg.ID}); err != nil {
+	if _, err := a.bot.PinChatMessage(ctx, &bot.PinChatMessageParams{
+		ChatID:              a.chatID,
+		MessageID:           panel.ID,
+		DisableNotification: true,
+	}); err != nil {
 		slog.Warn("pin failed (continuing)", "err", err)
+	} else if _, err := a.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
+		// The pin posts a service message whose ID the API does not return. It
+		// takes the ID after the widget unless the user sent a message between
+		// the two calls.
+		ChatID:    a.chatID,
+		MessageID: panel.ID + 1,
+	}); err != nil {
+		slog.Warn("delete pin notice failed", "err", err)
 	}
 
-	state[key] = msg.ID
-	if err := saveState(state); err != nil {
-		return 0, err
+	st := panelState{ChatID: a.chatID, Panel: panel.ID, Journal: journal.ID}
+	if err := saveState(st); err != nil {
+		return panelState{}, err
 	}
-	return msg.ID, nil
+	if old != (panelState{}) {
+		if _, err := a.bot.DeleteMessages(ctx, &bot.DeleteMessagesParams{
+			ChatID:     old.ChatID,
+			MessageIDs: []int{old.Panel, old.Journal},
+		}); err != nil {
+			slog.Warn("delete previous panel failed", "err", err)
+		}
+	}
+	return st, nil
+}
+
+// shownJournal is what the journal message last showed.
+type shownJournal struct {
+	text     string
+	expanded bool
+	retryAt  time.Time // set while rate-limited
+}
+
+// syncJournal edits the journal message when its content changed, and sends a
+// new one when the message is gone.
+func (a *app) syncJournal(ctx context.Context, st *panelState, shown *shownJournal) error {
+	expanded := a.expanded.Load()
+	text := renderJournal(a.journal, expanded)
+	if text == shown.text && expanded == shown.expanded || time.Now().Before(shown.retryAt) {
+		return nil
+	}
+
+	_, err := a.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:             a.chatID,
+		MessageID:          st.Journal,
+		Text:               text,
+		ParseMode:          models.ParseModeHTML,
+		LinkPreviewOptions: disabledPreview,
+		ReplyMarkup:        journalKeyboard(expanded),
+	})
+	var tooMany *bot.TooManyRequestsError
+	switch {
+	case err == nil, strings.Contains(strings.ToLower(err.Error()), "not modified"):
+	case errors.As(err, &tooMany):
+		slog.Warn("rate-limited", "retry_after", tooMany.RetryAfter)
+		shown.retryAt = time.Now().Add(time.Duration(tooMany.RetryAfter) * time.Second)
+		return nil
+	case errors.Is(err, bot.ErrorBadRequest):
+		slog.Error("edit journal failed, recreating", "err", err)
+		msg, err := a.sendJournal(ctx, text, expanded)
+		if err != nil {
+			slog.Error("recreate journal failed", "err", err)
+			return nil
+		}
+		st.Journal = msg.ID
+		if err := saveState(*st); err != nil {
+			return err
+		}
+	default:
+		slog.Error("edit journal failed", "err", err)
+		return nil
+	}
+	shown.text, shown.expanded = text, expanded
+	return nil
 }
 
 // awaitServers blocks until every server has reported up or the first interval
 // elapses, then announces the outcome to the alert chat.
 func (a *app) awaitServers(ctx context.Context, ready <-chan struct{}) {
-	timer := time.NewTimer(a.ctrl.Interval())
+	timer := time.NewTimer(scrapeInterval)
 	defer timer.Stop()
 
 	got := 0
@@ -267,75 +307,39 @@ func (a *app) awaitServers(ctx context.Context, ready <-chan struct{}) {
 	}
 }
 
-// renderLoop returns nil once ctx is cancelled and an error when it cannot
-// obtain the panel message.
+// renderLoop scrapes every scrapeInterval, checks alerts and keeps the journal
+// message in sync, while the panel widget pulls the metrics through widget
+// queries. It returns nil once ctx is cancelled and an error when it cannot set
+// up the panel or save its state.
 func (a *app) renderLoop(ctx context.Context, ready <-chan struct{}) error {
-	msgID, err := a.ensurePanelMessage(ctx, "")
+	st, err := a.startPanel(ctx)
 	if err != nil {
-		return fmt.Errorf("ensure panel message: %w", err)
+		return fmt.Errorf("start panel: %w", err)
 	}
 
 	a.awaitServers(ctx, ready)
-	if ctx.Err() != nil {
-		return nil
-	}
 
-	var scheduled, t0 time.Time
-	for {
+	ticker := time.NewTicker(scrapeInterval)
+	defer ticker.Stop()
+	var shown shownJournal
+	for due := true; ; {
 		if ctx.Err() != nil {
 			return nil
 		}
-		text := renderPanel(ctx, a.servers, a.journal, a.ctrl)
-		checkAlerts(ctx, a.bot, a.alertChatID, a.servers, a.journal)
-
-		_, err := a.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID:    a.chatID,
-			MessageID: msgID,
-			RichMessage: &models.InputRichMessage{
-				HTML: text,
-			},
-			ReplyMarkup:        keyboard(a.ctrl),
-			LinkPreviewOptions: disabledPreview,
-		})
-		if err != nil {
-			var tooMany *bot.TooManyRequestsError
-			switch {
-			case errors.As(err, &tooMany):
-				slog.Warn("rate-limited", "retry_after", tooMany.RetryAfter)
-				select {
-				case <-ctx.Done():
-					return nil
-				case <-time.After(time.Duration(tooMany.RetryAfter) * time.Second):
-				}
-				continue
-			case strings.Contains(strings.ToLower(err.Error()), "not modified"):
-			case errors.Is(err, bot.ErrorBadRequest):
-				slog.Error("edit failed, recreating", "err", err)
-				if id, e := a.ensurePanelMessage(ctx, text); e == nil {
-					msgID = id
-				} else {
-					slog.Error("recreate failed", "err", e)
-				}
-			default:
-				slog.Error("edit failed", "err", err)
-			}
+		if due {
+			scrape(ctx, a.servers)
+			checkAlerts(ctx, a.bot, a.alertChatID, a.servers, a.journal)
 		}
-
-		var timeout time.Duration
-		if !scheduled.IsZero() {
-			timeout = max(time.Until(scheduled), time.Second)
-			scheduled = time.Time{}
-		} else {
-			t0 = time.Now()
-			timeout = a.ctrl.Interval()
+		if err := a.syncJournal(ctx, &st, &shown); err != nil {
+			return fmt.Errorf("save state: %w", err)
 		}
-
-		refreshed := a.ctrl.waitRefresh(ctx, timeout)
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			return nil
-		}
-		if refreshed && a.ctrl.peekSkipUpdate() {
-			scheduled = t0.Add(a.ctrl.Interval())
+		case <-ticker.C:
+			due = true
+		case <-a.toggled:
+			due = false
 		}
 	}
 }

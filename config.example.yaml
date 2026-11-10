@@ -1,7 +1,9 @@
-# Telegram chat that hosts the pinned live panel. Required (except for --dry-run).
+# Private chat with the bot that hosts the pinned live panel, usually your user
+# ID. Required (except for --dry-run).
 chat_id: 123456789
 
-# Optional: route alerts to a separate chat. Defaults to chat_id.
+# Optional: route alerts and the startup notice to a separate chat, which may be
+# a group. Defaults to chat_id.
 alert_chat_id: 123456789
 
 # Optional: path to the SSH known_hosts file. Defaults to ~/.ssh/known_hosts.

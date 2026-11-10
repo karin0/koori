@@ -1,0 +1,181 @@
+<style>
+body { font-variant-numeric: tabular-nums; }
+[hidden] { display: none !important; }
+.hint { color: var(--tg-theme-hint-color); }
+.bad { color: var(--tg-theme-destructive-text-color, #e53935); }
+.small { font-size: .8em; }
+.pre { white-space: pre-line; }
+.card + .card { margin-top: .5em; padding-top: .45em; border-top: 1px solid var(--tg-theme-section-separator-color, var(--tg-theme-secondary-bg-color)); }
+.head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.body { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+.rings { display: flex; gap: 6px; flex: none; }
+.ring { position: relative; width: 46px; text-align: center; }
+.ring svg { display: block; width: 46px; height: 46px; transform: rotate(-90deg); }
+.ring circle { fill: none; }
+.track { stroke: var(--tg-theme-secondary-bg-color); stroke-width: 5; }
+.arc { stroke: var(--tg-theme-button-color); stroke-width: 5; stroke-linecap: round; transition: stroke-dasharray .6s; }
+.tick { stroke: var(--tg-theme-text-color); stroke-width: 8; }
+.high .arc { stroke: var(--tg-theme-destructive-text-color, #e53935); }
+.pct { position: absolute; top: 0; left: 0; right: 0; line-height: 46px; font-size: .8em; font-weight: 600; }
+.lbl { font-size: .75em; line-height: 1.5; color: var(--tg-theme-hint-color); }
+.side, .usage { min-width: 0; line-height: 1.45; }
+.usage { margin-top: 4px; }
+.side i, .usage i { font-style: normal; color: var(--tg-theme-hint-color); }
+.spark { display: block; width: 100%; height: 16px; margin-top: 6px; }
+.spark path { fill: none; stroke: var(--tg-theme-button-color); stroke-width: 1.5; stroke-linejoin: round; }
+.stale, .stale .bad { color: var(--tg-theme-hint-color); }
+.stale .arc, .stale .spark path { stroke: var(--tg-theme-hint-color); }
+@media (prefers-reduced-motion: reduce) { .arc { transition: none; } }
+</style>
+<div id="banner"></div>
+<div id="root"></div>
+<script>
+const W = window.TelegramWidget;
+const PERIOD = 5100; // background requests may go out every 5 s
+const STALE = 15; // seconds after which a card turns grey
+const R = 18, C = 2 * Math.PI * R;
+const LEVELS = '0123456789abcdefghijklmnopqrstuvwxyz';
+let data = [], failure = '', last = 0, busy = false, timer = 0;
+const cards = new Map();
+try { data = JSON.parse(localStorage.getItem('d')) || []; } catch (e) {}
+
+// fmt shows the three significant digits that the bot sends.
+const fmt = (x) => x < 100 ? x.toPrecision(3) : x.toFixed(0);
+const $ = (el, sel) => el.querySelector(sel);
+
+function size(x) {
+  for (const u of ['B', 'K', 'M', 'G', 'T']) {
+    if (x < 1024) return fmt(x) + u;
+    x /= 1024;
+  }
+  return fmt(x) + 'P';
+}
+
+function span(s) {
+  s = Math.max(0, Math.floor(s));
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm';
+  return Math.floor(s / 86400) + 'd ' + Math.floor(s % 86400 / 3600) + 'h';
+}
+
+function setText(el, text) {
+  if (el.textContent !== text) el.textContent = text;
+}
+
+function setHTML(el, html) {
+  if (el.innerHTML !== html) el.innerHTML = html;
+}
+
+const ring = (label) => '<div class="ring"><svg viewBox="0 0 46 46">' +
+  '<circle class="track" cx="23" cy="23" r="' + R + '"/><circle class="arc" cx="23" cy="23" r="' + R + '"/>' +
+  '<circle class="tick" cx="23" cy="23" r="' + R + '"/></svg><span class="pct"></span><div class="lbl">' + label + '</div></div>';
+
+function card(name) {
+  let el = cards.get(name);
+  if (el) return el;
+  el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = '<div class="head"><b></b><span class="age hint small"></span></div><div class="err bad small"></div>' +
+    '<div class="body"><div class="rings">' + ring('CPU') + ring('MEM') + ring('DISK') + '</div>' +
+    '<div class="side small"></div></div><div class="usage small"></div>' +
+    '<svg class="spark" viewBox="0 0 100 16" preserveAspectRatio="none"><path/></svg>' +
+    '<div class="alerts bad small pre"></div>';
+  cards.set(name, el);
+  return el;
+}
+
+function setRing(el, pct, peak) {
+  el.classList.toggle('high', pct >= 90);
+  setText($(el, '.pct'), pct == null ? '—' : Math.round(pct) + '%');
+  const arc = $(el, '.arc');
+  arc.style.display = pct ? '' : 'none'; // a round cap draws a dot even for an empty arc
+  arc.style.strokeDasharray = (pct ? Math.min(100, pct) / 100 * C : 0) + 'px ' + C + 'px';
+  const tick = $(el, '.tick');
+  tick.style.display = peak == null ? 'none' : '';
+  tick.setAttribute('stroke-dasharray', '1.5 ' + C);
+  tick.setAttribute('stroke-dashoffset', .75 - Math.min(100, peak || 0) / 100 * C);
+}
+
+function spark(h) {
+  if (!h || h.length < 2) return '';
+  const step = 100 / (h.length - 1);
+  return 'M' + [...h].map((c, i) => (i * step).toFixed(1) + ' ' + (15 - LEVELS.indexOf(c) / 35 * 14).toFixed(1)).join('L');
+}
+
+function update(el, s, now) {
+  const up = !!s.t;
+  el.classList.toggle('stale', up && now - s.t > STALE);
+  setText($(el, 'b'), (s.d ? '🔥 ' : s.e ? '💧 ' : '🧊 ') + s.n);
+  setText($(el, '.age'), up ? span(now - s.t) + ' ago · ' + s.q + '/' + s.x + ' ms' : s.s ? 'last seen ' + span(now - s.s) + ' ago' : '');
+  const err = $(el, '.err');
+  err.hidden = !(s.e || s.d);
+  setText(err, (s.d ? 'offline: ' : '') + (s.e || 'unknown error'));
+  for (const sel of ['.body', '.usage', '.spark', '.alerts']) $(el, sel).hidden = !up;
+  if (!up) return;
+
+  const rings = el.querySelectorAll('.ring');
+  const pct = (p) => p && p[1] ? 100 * p[0] / p[1] : null;
+  setRing(rings[0], s.c[0], s.c[1]);
+  setRing(rings[1], pct(s.m));
+  setRing(rings[2], pct(s.f));
+  // Every value here is a number the bot formatted, so the lines need no escaping.
+  const rate = (r) => r == null ? '—' : size(r) + '/s';
+  const use = (p) => size(p[0]) + ' / ' + size(p[1]);
+  setHTML($(el, '.side'), [
+    '<i>↓</i> ' + rate(s.rx[1]) + '\u2002<i>↑</i> ' + rate(s.tx[1]),
+    '<i>Σ ↓</i> ' + size(s.rx[0]) + '\u2002<i>↑</i> ' + size(s.tx[0]),
+    (s.T != null ? s.T + '°C <i>·</i> ' : '') + '<i>load</i> ' + s.l + ' <i>·</i> ' + s.k + ' <i>cores</i>',
+    '<i>up</i> ' + span(s.t - s.b) + (s.w ? ' <i>· swap</i> ' + size(s.w[0]) : ''),
+  ].join('<br>'));
+  setHTML($(el, '.usage'), '<i>MEM</i> ' + use(s.m) + (s.f ? '\u2003<i>DISK</i> ' + use(s.f) : ''));
+
+  const d = spark(s.h);
+  $(el, '.spark').hidden = !d;
+  $(el, '.spark path').setAttribute('d', d);
+  setText($(el, '.alerts'), (s.a || []).map((a) => '⚠️ ' + a).join('\n'));
+}
+
+function draw() {
+  const now = Date.now() / 1000, root = document.getElementById('root');
+  const banner = document.getElementById('banner');
+  banner.className = failure ? 'bad small' : 'hint';
+  setText(banner, failure ? '⚠️ koori: ' + failure : data.length ? '' : 'waiting for koori…');
+  const names = new Set(data.map((s) => s.n));
+  for (const [name, el] of cards) if (!names.has(name)) { el.remove(); cards.delete(name); }
+  data.forEach((s, i) => {
+    const el = card(s.n);
+    if (root.children[i] !== el) root.insertBefore(el, root.children[i] || null);
+    update(el, s, now);
+  });
+}
+
+function poll() {
+  clearTimeout(timer);
+  if (busy) return;
+  busy = true;
+  last = Date.now();
+  W.request('p').then((a) => {
+    failure = '';
+    if (a.result) {
+      data = JSON.parse(a.result);
+      try { localStorage.setItem('d', a.result); } catch (e) {}
+    }
+  }, (e) => { failure = e.code || String(e); }).finally(() => {
+    busy = false;
+    draw();
+    schedule();
+  });
+}
+
+function schedule() {
+  clearTimeout(timer);
+  if (W.isActive && !busy) timer = setTimeout(poll, Math.max(0, last + PERIOD - Date.now()));
+}
+
+W.onEvent('activated', schedule);
+W.onEvent('deactivated', () => clearTimeout(timer));
+draw();
+poll(); // waits until the widget appears
+setInterval(draw, 1000);
+</script>

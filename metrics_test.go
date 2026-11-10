@@ -51,8 +51,8 @@ func TestParseMetricsBaseline(t *testing.T) {
 	if m.MemUsed != 600 || m.MemTotal != 1000 {
 		t.Errorf("mem = %d/%d, want 600/1000", m.MemUsed, m.MemTotal)
 	}
-	if m.FSUsed != 750 || m.FSTotal != 1000 || m.FSMount != "/" {
-		t.Errorf("fs = %d/%d %q, want 750/1000 /", m.FSUsed, m.FSTotal, m.FSMount)
+	if m.FSUsed != 750 || m.FSTotal != 1000 {
+		t.Errorf("fs = %d/%d, want 750/1000", m.FSUsed, m.FSTotal)
 	}
 	if math.IsNaN(m.Temp) || m.Temp != 55 || m.TempChip != "platform_y" {
 		t.Errorf("temp = %v %q, want 55 platform_y", m.Temp, m.TempChip)
