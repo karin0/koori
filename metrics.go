@@ -34,8 +34,6 @@ var scalarKeys = func() map[string]struct{} {
 		"node_time_seconds",
 		"node_scrape_collector_duration_seconds",
 		"node_load1",
-		"node_load5",
-		"node_load15",
 		"node_boot_time_seconds",
 		"node_memory_MemTotal_bytes",
 		"node_memory_MemAvailable_bytes",
@@ -60,7 +58,6 @@ var scalarKeys = func() map[string]struct{} {
 type MetricsSnapshot struct {
 	Timestamp  float64 // server unix time of the scrape
 	ScrapeTime float64 // total collector duration, seconds
-	FetchTime  float64 // round trip of the scrape, seconds, set by refreshMetrics
 	CPUPct     float64
 	CPUMaxPct  float64
 	CPUCount   int
@@ -70,14 +67,15 @@ type MetricsSnapshot struct {
 	SwapUsed   int64
 	SwapTotal  int64
 	FSUsed     int64
-	FSTotal    int64 // of the root filesystem, 0 when it was not reported
+	FSTotal    int64
+	FSMount    string // "" when the root filesystem was not reported
 	Rx         float64
 	Tx         float64
 	RxBps      float64
 	TxBps      float64
 	Temp       float64
 	TempChip   string
-	Load       [3]float64 // 1, 5 and 15 minute averages
+	Load1      float64
 	BootTime   float64
 	Alerts     []string
 	CntAlerts  []string
@@ -252,8 +250,10 @@ func parseMetrics(name string, prev *MetricsSnapshot, text string) *MetricsSnaps
 		cpuSeconds[cid] = [2]float64{perCPUIdle[cid], total}
 	}
 
+	fsMount := ""
 	var fsUsed int64
 	if fsTotal != 0 {
+		fsMount = "/"
 		fsUsed = max(0, fsTotal-fsAvailBytes)
 	}
 
@@ -270,13 +270,14 @@ func parseMetrics(name string, prev *MetricsSnapshot, text string) *MetricsSnaps
 		SwapTotal:  swapTotal,
 		FSUsed:     fsUsed,
 		FSTotal:    fsTotal,
+		FSMount:    fsMount,
 		Rx:         rxTotal,
 		Tx:         txTotal,
 		RxBps:      rxBps,
 		TxBps:      txBps,
 		Temp:       tempMax,
 		TempChip:   tempChip,
-		Load:       [3]float64{scalars["node_load1"], scalars["node_load5"], scalars["node_load15"]},
+		Load1:      scalars["node_load1"],
 		BootTime:   scalars["node_boot_time_seconds"],
 		Alerts:     alerts,
 		CntAlerts:  cntAlerts,

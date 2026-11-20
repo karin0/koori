@@ -23,8 +23,6 @@ node_vmstat_oom_kill 5
 node_hwmon_temp_celsius{chip="platform_x"} 40
 node_hwmon_temp_celsius{chip="platform_y"} 55
 node_load1 1.5
-node_load5 1.25
-node_load15 1
 node_boot_time_seconds 0
 node_scrape_collector_duration_seconds{collector="cpu"} 0.01
 node_scrape_collector_success{collector="cpu"} 1
@@ -53,8 +51,8 @@ func TestParseMetricsBaseline(t *testing.T) {
 	if m.MemUsed != 600 || m.MemTotal != 1000 {
 		t.Errorf("mem = %d/%d, want 600/1000", m.MemUsed, m.MemTotal)
 	}
-	if m.FSUsed != 750 || m.FSTotal != 1000 {
-		t.Errorf("fs = %d/%d, want 750/1000", m.FSUsed, m.FSTotal)
+	if m.FSUsed != 750 || m.FSTotal != 1000 || m.FSMount != "/" {
+		t.Errorf("fs = %d/%d %q, want 750/1000 /", m.FSUsed, m.FSTotal, m.FSMount)
 	}
 	if math.IsNaN(m.Temp) || m.Temp != 55 || m.TempChip != "platform_y" {
 		t.Errorf("temp = %v %q, want 55 platform_y", m.Temp, m.TempChip)
@@ -68,8 +66,8 @@ func TestParseMetricsBaseline(t *testing.T) {
 	if m.CPUCount != 1 {
 		t.Errorf("cpu count = %d, want 1", m.CPUCount)
 	}
-	if m.Load != [3]float64{1.5, 1.25, 1} {
-		t.Errorf("load = %v, want [1.5 1.25 1]", m.Load)
+	if !almost(m.Load1, 1.5) {
+		t.Errorf("load1 = %v, want 1.5", m.Load1)
 	}
 }
 

@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -43,13 +41,14 @@ func main() {
 	}
 
 	journal := NewJournal(journalBufferSize)
+	ctrl := NewPanelControl()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if *dryRun {
-		runDryRun(ctx, servers, journal)
-	} else if err := runBot(ctx, cfg, servers, journal); err != nil {
+		runDryRun(ctx, servers, journal, ctrl)
+	} else if err := runBot(ctx, cfg, servers, journal, ctrl); err != nil {
 		slog.Error("bot", "err", err)
 		os.Exit(1)
 	}
@@ -104,9 +103,7 @@ func buildServers(cfg *Config) ([]*ServerState, error) {
 	return servers, nil
 }
 
-// runDryRun prints the panel data and the newest journal lines every
-// scrapeInterval.
-func runDryRun(ctx context.Context, servers []*ServerState, journal *Journal) {
+func runDryRun(ctx context.Context, servers []*ServerState, journal *Journal, ctrl *PanelControl) {
 	var wg sync.WaitGroup
 	for _, s := range servers {
 		wg.Go(func() {
@@ -115,42 +112,35 @@ func runDryRun(ctx context.Context, servers []*ServerState, journal *Journal) {
 	}
 	defer wg.Wait()
 
-	ticker := time.NewTicker(scrapeInterval)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	for {
-		scrape(ctx, servers)
+
+	render := func() {
 		fmt.Print("\x1b[2J\x1b[H")
-		var out bytes.Buffer
-		data, err := panelData(servers)
-		if err == nil {
-			err = json.Indent(&out, data, "", "  ")
-		}
-		if err != nil {
-			slog.Error("encode panel data", "err", err)
-		}
-		fmt.Println(out.String())
-		for _, line := range journal.messagesNewest(nil, journalLines) {
-			fmt.Println(trimLine(line))
-		}
+		fmt.Println(renderPanel(ctx, servers, journal, ctrl))
+	}
+	render()
+	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			render()
 		}
 	}
 }
 
-func runBot(ctx context.Context, cfg *Config, servers []*ServerState, journal *Journal) error {
+func runBot(ctx context.Context, cfg *Config, servers []*ServerState, journal *Journal, ctrl *PanelControl) error {
 	if cfg.ChatID == 0 {
 		return errors.New("chat_id required")
 	}
 
 	a := &app{
+		ctrl:        ctrl,
 		chatID:      cfg.ChatID,
 		alertChatID: cfg.AlertChatID,
 		servers:     servers,
 		journal:     journal,
-		toggled:     make(chan struct{}, 1),
 	}
 	b, err := buildBot(a)
 	if err != nil {
